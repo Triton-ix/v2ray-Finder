@@ -109,7 +109,6 @@ def load_xray_config() -> dict:
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
-                # Merge with defaults
                 if "core" in user_config:
                     default_config["core"].update(user_config["core"])
                 return default_config
@@ -344,31 +343,19 @@ def fetch_all_configs(subscription_links):
 
 
 # ============================================================
-# بخش 3: تست کانفیگ با Xray Core (با پشتیبانی از config.json)
+# بخش 3: تست کانفیگ با Xray Core (ساده شده برای گیت‌هاب)
 # ============================================================
 
 def download_xray_core(vendor_path: Path) -> bool:
-    """Download Xray core binary"""
+    """Download Xray core binary - optimized for GitHub Actions"""
     system = platform.system().lower()
-    arch = platform.machine().lower()
     
-    if system == "linux":
-        if arch in ["x86_64", "amd64"]:
-            download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-        elif arch in ["aarch64", "arm64"]:
-            download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
-        else:
-            color_print(f"[!] Unsupported architecture: {arch}", Fore.RED)
-            return False
-    elif system == "darwin":
-        download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-macos-64.zip"
-    else:
-        color_print(f"[!] Unsupported OS: {system}", Fore.RED)
-        return False
+    # GitHub Actions runs on Ubuntu 24.04 (Linux x86_64)
+    download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
     
     try:
-        color_print("[*] Downloading Xray core...", Fore.CYAN)
-        resp = requests.get(download_url, timeout=60)
+        color_print("[*] Downloading Xray core for Linux x86_64...", Fore.CYAN)
+        resp = requests.get(download_url, timeout=120)
         resp.raise_for_status()
         
         zip_path = vendor_path / "xray.zip"
@@ -382,11 +369,17 @@ def download_xray_core(vendor_path: Path) -> bool:
         
         # Make executable
         xray_path = vendor_path / "xray"
-        if system == "linux" or system == "darwin":
-            xray_path.chmod(0o755)
+        xray_path.chmod(0o755)
         
-        color_print("[✓] Xray core downloaded successfully", Fore.GREEN)
-        return True
+        # Verify it works
+        result = subprocess.run([str(xray_path), "-version"], capture_output=True)
+        if result.returncode == 0:
+            color_print("[✓] Xray core downloaded and working", Fore.GREEN)
+            return True
+        else:
+            color_print("[!] Xray binary test failed", Fore.RED)
+            return False
+            
     except Exception as e:
         color_print(f"[!] Failed to download Xray: {e}", Fore.RED)
         return False
@@ -429,12 +422,7 @@ def parse_v2ray_uri(uri: str) -> Optional[dict]:
                 'password': parsed.username or '',
                 'original_uri': uri
             }
-        elif uri.startswith('ss://'):
-            return {
-                'protocol': 'shadowsocks',
-                'original_uri': uri
-            }
-    except Exception as e:
+    except Exception:
         pass
     return None
 
@@ -443,12 +431,12 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
     """Build Xray configuration with settings from config.json"""
     core_settings = XRAY_SETTINGS["core"]
     
-    # Base config
     config = {
         "log": {"loglevel": core_settings.get("log_level", "warning")},
         "inbounds": [{
             "port": inbound_port,
             "protocol": "socks",
+            "tag": "socks-inbound",
             "settings": {"auth": "noauth", "udp": True},
             "sniffing": {
                 "enabled": core_settings.get("sniffing_enabled", True),
@@ -470,22 +458,7 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
     if config["inbounds"][0]["sniffing"] is None:
         del config["inbounds"][0]["sniffing"]
     
-    # Set inbound tag
-    config["inbounds"][0]["tag"] = "socks-inbound"
-    
-    # Add DNS if enabled
-    if core_settings.get("dns", {}).get("enabled", False):
-        dns_settings = core_settings["dns"]
-        config["dns"] = {
-            "servers": [
-                dns_settings.get("remote_server", "https://8.8.8.8/dns-query"),
-                dns_settings.get("domestic_server", "1.1.1.2")
-            ]
-        }
-        if dns_settings.get("fake_dns_enabled", False):
-            config["dns"]["fakeDns"] = {"enabled": True, "poolSize": 65535}
-    
-    # Build outbound based on protocol
+    # Build outbound
     if parsed['protocol'] == 'vless':
         outbound = {
             "protocol": "vless",
@@ -533,7 +506,7 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
     else:
         return None
     
-    # Add fragment settings if enabled
+    # Add fragment if enabled
     if core_settings.get("fragment", {}).get("enabled", False):
         frag = core_settings["fragment"]
         outbound["streamSettings"] = {
@@ -546,50 +519,35 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
             }
         }
     
-    # Add mux if enabled
-    if core_settings.get("mux", {}).get("enabled", False):
-        outbound["mux"] = {"enabled": True, "concurrency": core_settings["mux"].get("concurrency", 8)}
-    
-    # Add security settings
-    outbound["settings"]["vnext"][0]["users"][0]["security"] = parsed.get('security', 'auto')
-    
     config["outbounds"].append(outbound)
-    
     return config
 
 
 def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) -> Tuple[Optional[str], Optional[float]]:
-    """Test a single config using Xray core and return (config_line, response_time_ms) if working"""
+    """Test a single config using Xray core"""
     parsed = parse_v2ray_uri(config_line)
     if not parsed or not parsed.get('address') or not parsed.get('port'):
-        return None, None
-    
-    # Skip shadowsocks for now
-    if parsed['protocol'] == 'shadowsocks':
         return None, None
     
     config = build_xray_config(parsed, local_port)
     if not config:
         return None, None
     
-    # Write config to temp file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        json.dump(config, f, indent=2)
+        json.dump(config, f)
         config_path = f.name
     
     process = None
     try:
-        # Start Xray process
         process = subprocess.Popen(
             [str(xray_path), "-config", config_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
         
-        # Wait for port to be ready
+        # Wait for port
         time.sleep(2)
         
-        # Test connection through SOCKS proxy
         proxies = {
             "http": f"socks5h://127.0.0.1:{local_port}",
             "https": f"socks5h://127.0.0.1:{local_port}"
@@ -602,7 +560,7 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
         if response.status_code < 500 and elapsed_ms <= MAX_RESPONSE_TIME_MS:
             return config_line, elapsed_ms
         
-    except Exception as e:
+    except Exception:
         pass
     finally:
         if process:
@@ -620,41 +578,35 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
 def test_configs_and_save(unique_configs: List[str]) -> int:
     """Test configs using Xray core and save fastest ones"""
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("STEP 3: Testing configs with Xray Core (Real proxy test)", Fore.YELLOW, Style.BRIGHT)
+    color_print("STEP 3: Testing configs with Xray Core", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     total_available = len(unique_configs)
-    print(f"[*] Total unique configs available: {total_available}")
-    print(f"[*] Goal: Find {MAX_FASTEST_CONFIGS} configs with response time < {MAX_RESPONSE_TIME_MS}ms")
-    print(f"[*] Testing will stop once target is reached\n")
+    print(f"[*] Total unique configs: {total_available}")
+    print(f"[*] Goal: {MAX_FASTEST_CONFIGS} configs under {MAX_RESPONSE_TIME_MS}ms")
+    print(f"[*] Will stop when target reached\n")
     
-    # Setup Xray environment
+    # Setup Xray
     project_root = Path(__file__).parent.resolve()
     vendor_path = project_root / "vendor"
     vendor_path.mkdir(exist_ok=True)
     
     xray_path = vendor_path / "xray"
-    if platform.system().lower() == "windows":
-        xray_path = vendor_path / "xray.exe"
     
     if not xray_path.exists():
         if not download_xray_core(vendor_path):
-            color_print("[!] Xray core setup failed. Exiting.", Fore.RED)
+            color_print("[!] Xray setup failed", Fore.RED)
             return 0
     
-    # Shuffle for random testing
+    # Shuffle and test
     random.shuffle(unique_configs)
     
-    fastest_configs = []  # (response_time_ms, config_line)
+    fastest_configs = []
     tested_count = 0
     base_port = 20800
     
     for config_line in unique_configs:
-        if stop_processing:
-            break
-        
-        if len(fastest_configs) >= MAX_FASTEST_CONFIGS:
-            color_print(f"\n[✓] Target reached! Found {len(fastest_configs)} fast configs. Stopping.", Fore.GREEN)
+        if stop_processing or len(fastest_configs) >= MAX_FASTEST_CONFIGS:
             break
         
         tested_count += 1
@@ -665,12 +617,10 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
         if result and response_time:
             fastest_configs.append((response_time, result))
             fastest_configs.sort(key=lambda x: x[0])
-            
-            print(f"\r[Tested: {tested_count}] ✓ Found! Speed: {response_time:.1f}ms | Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
+            print(f"\r[Tested: {tested_count}] ✓ Found! {response_time:.1f}ms | Total: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
         else:
             print(f"\r[Tested: {tested_count}] Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", end='', flush=True)
         
-        # Small delay between tests
         time.sleep(random.uniform(0.3, 0.7))
     
     print()
@@ -679,17 +629,12 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
         color_print("[!] No working configs found!", Fore.RED)
         return 0
     
-    # Save to file
+    # Save results
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for response_time, config_line in fastest_configs:
+        for _, config_line in fastest_configs:
             f.write(config_line + '\n')
     
-    fastest_time = fastest_configs[0][0]
-    slowest_in_top = fastest_configs[-1][0]
-    
-    color_print(f"\n[✓] Saved {len(fastest_configs)} fastest configs to {OUTPUT_FILE}", Fore.GREEN)
-    color_print(f"[*] Fastest: {fastest_time:.1f}ms | Slowest in list: {slowest_in_top:.1f}ms", Fore.CYAN)
-    
+    color_print(f"\n[✓] Saved {len(fastest_configs)} configs to {OUTPUT_FILE}", Fore.GREEN)
     return len(fastest_configs)
 
 
@@ -698,7 +643,7 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
 # ============================================================
 
 def git_commit_and_push():
-    """Commit and push the output file to GitHub"""
+    """Commit and push the output file"""
     try:
         subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=False, capture_output=True)
         subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False, capture_output=True)
@@ -708,14 +653,11 @@ def git_commit_and_push():
         if result.returncode != 0:
             commit_msg = f"Auto-update {OUTPUT_FILE} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             subprocess.run(["git", "commit", "-m", commit_msg], check=True, capture_output=True)
-            push_result = subprocess.run(["git", "push"], capture_output=True)
-            if push_result.returncode != 0:
-                color_print(f"[!] Push failed: {push_result.stderr.decode()}", Fore.YELLOW)
-            else:
-                color_print("[✓] Committed and pushed to GitHub", Fore.GREEN)
+            subprocess.run(["git", "push"], check=True, capture_output=True)
+            color_print("[✓] Committed and pushed", Fore.GREEN)
         else:
-            color_print("[*] No changes to commit", Fore.CYAN)
-    except subprocess.CalledProcessError as e:
+            color_print("[*] No changes", Fore.CYAN)
+    except Exception as e:
         color_print(f"[!] Git error: {e}", Fore.RED)
 
 
@@ -723,7 +665,7 @@ def main():
     global stop_processing
     stop_processing = False
     
-    # Install colorama for colored output
+    # Setup colorama
     try:
         from colorama import init, Fore, Style
         init(autoreset=True)
@@ -733,32 +675,25 @@ def main():
         init(autoreset=True)
     
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("V2RAY MANAGER - Complete Automation with Xray Core", Fore.YELLOW, Style.BRIGHT)
+    color_print("V2RAY MANAGER - GitHub Actions Optimized", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
-    
-    print(f"[*] Using config from: {CONFIG_FILE}")
-    print(f"[*] Test URL: {TEST_URL}")
-    print(f"[*] Fragment: {'Enabled' if XRAY_SETTINGS['core'].get('fragment', {}).get('enabled', False) else 'Disabled'}")
-    print(f"[*] DNS Fake: {'Enabled' if XRAY_SETTINGS['core'].get('dns', {}).get('fake_dns_enabled', False) else 'Disabled'}")
     
     start_time = time.time()
     
     try:
         # Step 1: Find subscription links
         subscription_links = find_subscription_links()
-        
         if not subscription_links:
-            color_print("\n[!] No subscription links found. Exiting.", Fore.RED)
+            color_print("\n[!] No subscription links found", Fore.RED)
             sys.exit(1)
         
         # Step 2: Fetch and deduplicate configs
         unique_configs = fetch_all_configs(subscription_links)
-        
         if not unique_configs:
-            color_print("\n[!] No configs extracted. Exiting.", Fore.RED)
+            color_print("\n[!] No configs extracted", Fore.RED)
             sys.exit(1)
         
-        # Step 3: Test configs with Xray core and save fastest
+        # Step 3: Test configs and save fastest
         saved_count = test_configs_and_save(unique_configs)
         
         # Summary
@@ -766,24 +701,17 @@ def main():
         color_print("\n" + "="*60, Fore.CYAN)
         color_print("SUMMARY", Fore.YELLOW, Style.BRIGHT)
         color_print("="*60, Fore.CYAN)
-        print(f"  Subscription links found: {len(subscription_links)}")
-        print(f"  Total unique configs: {len(unique_configs)}")
-        print(f"  Working fast configs saved: {saved_count}")
-        print(f"  Max response time allowed: {MAX_RESPONSE_TIME_MS}ms")
-        print(f"  Output file: {OUTPUT_FILE}")
-        print(f"  Total time: {elapsed:.1f} seconds")
+        print(f"  Subscription links: {len(subscription_links)}")
+        print(f"  Unique configs: {len(unique_configs)}")
+        print(f"  Fast configs saved: {saved_count}")
+        print(f"  Time: {elapsed:.1f}s")
         color_print("="*60, Fore.CYAN)
         
-        # Commit and push to GitHub
         if saved_count > 0:
             git_commit_and_push()
         
-    except KeyboardInterrupt:
-        color_print("\n[!] Interrupted by user", Fore.YELLOW)
     except Exception as e:
         color_print(f"\n[ERROR] {e}", Fore.RED)
-        import traceback
-        traceback.print_exc()
         sys.exit(1)
 
 
