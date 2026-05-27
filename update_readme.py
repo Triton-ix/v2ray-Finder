@@ -19,15 +19,6 @@ def to_jalali(gregorian_dt):
     local = gregorian_dt.astimezone(tehran_tz)
     return jdatetime.datetime.fromgregorian(datetime=local).strftime("%Y/%m/%d %H:%M:%S")
 
-def hours_ago(dt_utc):
-    """Returns number of hours since given UTC datetime, as a string e.g. '3 ساعت پیش'"""
-    now = datetime.now(timezone.utc)
-    diff = now - dt_utc
-    hours = int(diff.total_seconds() // 3600)
-    if hours < 1:
-        return "همین الان"
-    return f"{hours} ساعت پیش"
-
 def read_lines_count(fname):
     if not os.path.exists(fname):
         return 0
@@ -60,11 +51,11 @@ def generate_readme():
     # آمار کانفیگ‌ها
     raw_total = get_raw_total()
     unique_total = read_lines_count("cleaned_configs.txt")
-    working_total = read_lines_count("success_config.txt")
+    working_total = read_lines_count("success_config.txt")  # این همان 2000 است
     duplicate_total = raw_total - unique_total if raw_total > unique_total else 0
     dead_configs = unique_total - working_total if unique_total > working_total else 0
 
-    # درصدها (نسبت به مبنای مناسب)
+    # درصدها
     perc_links_working = (working_links / total_links * 100) if total_links else 0
     perc_links_dead = (dead_links / total_links * 100) if total_links else 0
     perc_raw = 100.0
@@ -73,98 +64,74 @@ def generate_readme():
     perc_dead_configs = (dead_configs / unique_total * 100) if unique_total else 0
     perc_working = (working_total / unique_total * 100) if unique_total else 0
 
-    # زمان بروزرسانی (از زمان آخرین commit این فایل یا حالا)
-    # برای نمایش "ساعت پیش" از زمان حال استفاده می‌کنیم (لحظه تولید)
+    # زمان بروزرسانی به شمسی و تهران
     now_utc = datetime.now(timezone.utc)
-    last_update_str = hours_ago(now_utc)  # در لحظه تولید 0 ساعت است، ولی برای نمایش "همین الان" خوب است
-    # اما برای واقعیت، بهتر است زمان آخرین commit را بگیریم. ساده می‌گیریم زمان حال:
-    # چون README تازه تولید شده، می‌نویسیم "همین الان"
-    if last_update_str == "همین الان":
-        last_update_display = "همین الان"
-    else:
-        last_update_display = last_update_str
+    jalali_str = to_jalali(now_utc)
 
-    # تولید جدول HTML با راست به چپ و وسط‌چین
-    html_table = f"""
-<div dir="rtl" style="text-align: center; overflow-x: auto;">
-<table style="margin-left: auto; margin-right: auto; border-collapse: collapse; width: 100%; text-align: center;">
-<thead>
-<tr style="background-color: #f2f2f2;">
-<th>آیتم</th>
-<th>🔗 کل لینکهای SUB</th>
-<th>✅ لینک‌های سالم</th>
-<th>❌ لینک‌های خراب</th>
-<th>📥 کل کانفیگ‌ها</th>
-<th>🗑️ کانفیگ‌ تکراری</th>
-<th>🔄 کانفیگ‌ بدون تکرار</th>
-<th>🔴 کانفیگ‌ خراب</th>
-<th>🟢 کانفیگ‌ تست شده</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="font-weight: bold;">تعداد</td>
-<td>{total_links}</td>
-<td>{working_links}</td>
-<td>{dead_links}</td>
-<td>{raw_total}</td>
-<td>{duplicate_total}</td>
-<td>{unique_total}</td>
-<td>{dead_configs}</td>
-<td>{working_total}</td>
-</tr>
-<tr>
-<td style="font-weight: bold;">درصد</td>
-<td>100%</td>
-<td>{perc_links_working:.1f}%</td>
-<td>{perc_links_dead:.1f}%</td>
-<td>100%</td>
-<td>{perc_duplicate:.1f}%</td>
-<td>{perc_unique:.1f}%</td>
-<td>{perc_dead_configs:.1f}%</td>
-<td>{perc_working:.1f}%</td>
-</tr>
-</tbody>
-</table>
-</div>
-<p style="text-align: center;">درصد کانفیگ‌ها نسبت به کل کانفیگ‌های بدون تکرار محاسبه شده است.<br>
-کانفیگ‌های تست شده فقط کانفیگ‌هایی هستند که در تست سریع زیر ۳۰۰ میلی ثانیه پینگ داده‌اند.</p>
-"""
+    # لینک با نام کاربری جدید (Triton-ix)
+    repo_url = "https://github.com/Triton-ix/sub-link-checker/blob/main/success_config.txt"
+    
+    # تولید بارکد (با استفاده از API ساده)
+    barcode_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={repo_url}"
 
-    # تاریخ شمسی برای نمایش (اختیاری، ولی برای ساعت پیش نیازی نیست)
-    jalali_date = to_jalali(now_utc)  # برای استفاده در جای دیگر
-
-    # متن اصلی با اعداد داینامیک (بولد و زیرخط دار)
     readme_content = f"""
 <div dir="rtl" style="text-align: justify;">
 
 این کدها با کمک **Vibe Coding** و با نظارت انسان با هوش مصنوعی ساخته شده‌اند.
 
 ## نحوه جمع‌آوری خودکار لینک‌های اشتراک
-لینک‌های سابسکریپشن (`pool_address.txt`) هر ۵ روز یکبار با جستجو در ریپازیتوری‌های گیت‌هاب مرتبط با ایران یافت می‌شوند ( فقط لینک‌هایی که در ۵ روز گذشته بروز شده باشند انتخاب می‌گردند).  
-کانفیگ‌های درون همه لینکها استخراج شده و همه کانفیگ‌های تکراری حذف می‌شوند سپس تمام کانفیگ‌های باقیمانده تست می‌شوند و در نهایت در فایل `success_config.txt` فقط کانفیگ‌هایی که در تست سالم تشخیص داده شده‌اند ذخیره می‌گردد تا شما بتوانید به‌راحتی از آنها استفاده کنید.
+لینک‌های سابسکریپشن (`pool_address.txt`) هر ۵ روز یکبار با جستجو در ریپازیتوری‌های گیت‌هاب مرتبط با ایران یافت می‌شوند ( فقط لینک‌هایی که در ۵ روز گذشته بروز شده باشند انتخاب می‌گردند). ( بنابراین همیشه لینکهای جدید جایگزین لینکهای قدیمی میشوند)
 
-لینک زیر شامل **<u>{working_total} کانفیگ تست‌شده و فعال</u>** است که در بیش از **<u>{total_links} لینک سابسکریپشن</u>** و در مجموع از بین **<u>{raw_total} کانفیگ مختلف</u>** تکراری و خراب تست و استخراج شده‌اند.
+کانفیگ‌های درون همه لینکها استخراج شده و همه کانفیگ‌های تکراری حذف می‌شوند سپس تمام کانفیگ‌های باقیمانده تست می‌شوند و در نهایت **۲۰۰۰ تا از سریعترین کانفیگها** در فایل `success_config.txt` ذخیره می‌گردد تا شما بتوانید به‌راحتی از آنها استفاده کنید.
 
-برای استفاده از کانفیگ‌های سالم، فقط کافی است لینک زیر را در نرم‌افزار های کلاینت V2Ray خود وارد کنید:  
-👉 [https://github.com/kagemoosha/sub-link-checker/blob/main/success_config.txt](https://github.com/kagemoosha/sub-link-checker/blob/main/success_config.txt)
+لینک زیر شامل **۲۰۰۰ کانفیگ تست‌شده و فعال** است که از **{working_links} لینک سابسکریپشن** و در مجموع از بین **{raw_total} کانفیگ مختلف** تکراری و خراب تست و استخراج شده‌اند.
+
+برای استفاده از کانفیگ‌های سالم، فقط کافی است لینک زیر را در نرم‌افزار های کلاینت V2Ray خود وارد کنید:
+
+<div style="text-align: center; margin: 20px 0;">
+    <img src="{barcode_url}" alt="QR Code" style="display: inline-block;">
+</div>
+
+<div style="text-align: center; direction: ltr; background-color: #f5f5f5; padding: 10px; border-radius: 5px; display: inline-block; width: 100%;">
+    <code style="font-size: 14px; word-break: break-all;">{repo_url}</code>
+    <button onclick="navigator.clipboard.writeText('{repo_url}')" style="margin-right: 10px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer;">📋 کپی</button>
+</div>
 
 ## گزارش خودکار وضعیت کانفیگ‌ها
 
-**آخرین بروزرسانی :** {last_update_display}
+**📅 آخرین بروزرسانی :** {jalali_str}
 
-{html_table}
+<div dir="rtl" style="text-align: center; overflow-x: auto;">
+<table style="margin-left: auto; margin-right: auto; border-collapse: collapse; width: 80%; text-align: center;">
+<thead>
+<tr style="background-color: #f2f2f2;">
+<th>آیتم</th>
+<th>✅ لینک‌های سالم</th>
+<th>📥 کل کانفیگ‌ها</th>
+<th>🔄 کانفیگ‌ ها بدون تکرار</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="font-weight: bold;">تعداد</td>
+<td>{working_links}</td>
+<td>{raw_total}</td>
+<td>{unique_total}</td>
+</tr>
+</tbody>
+</table>
+</div>
 
 ## فایل‌های خروجی
-- `pool_address.txt` : لینک های سابسکرایب پیدا شده  
-- `cleaned_configs.txt` : کانفیگ‌های یکتا  
-- `success_config.txt` : کانفیگ‌های سالم (تست شده)
+- `pool_address.txt` : لینک های سابسکرایب پیدا شده
+- `cleaned_configs.txt` : کانفیگ‌های یکتا
+- `success_config.txt` : تعداد ۲۰۰۰ کانفیگ منتخب با بالاترین پینگ (تست شده)
 
 </div>
 """
     with open("README.md", "w", encoding='utf-8') as f:
         f.write(readme_content)
-    print("README.md updated with RTL table and dynamic numbers.")
+    print("README.md updated successfully with new design!")
 
 if __name__ == "__main__":
     generate_readme()
