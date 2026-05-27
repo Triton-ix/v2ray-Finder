@@ -75,6 +75,14 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
+# Import colorama after installing if needed
+try:
+    from colorama import init, Fore, Style
+    init(autoreset=True)
+except ImportError:
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'colorama'])
+    from colorama import init, Fore, Style
+    init(autoreset=True)
 
 def color_print(text, color=Fore.WHITE, style=Style.NORMAL):
     print(f"{style}{color}{text}{Style.RESET_ALL}")
@@ -349,13 +357,11 @@ def fetch_all_configs(subscription_links):
 
 def download_xray_core(vendor_path: Path) -> bool:
     """Download Xray core binary - optimized for GitHub Actions"""
-    system = platform.system().lower()
-    
-    # GitHub Actions runs on Ubuntu 24.04 (Linux x86_64)
-    download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-    
     try:
         color_print("[*] Downloading Xray core for Linux x86_64...", Fore.CYAN)
+        
+        # Simple download using requests
+        download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         resp = requests.get(download_url, timeout=120)
         resp.raise_for_status()
         
@@ -363,6 +369,7 @@ def download_xray_core(vendor_path: Path) -> bool:
         with open(zip_path, 'wb') as f:
             f.write(resp.content)
         
+        # Extract
         with zipfile.ZipFile(zip_path, 'r') as zipf:
             zipf.extractall(vendor_path)
         
@@ -372,7 +379,7 @@ def download_xray_core(vendor_path: Path) -> bool:
         xray_path = vendor_path / "xray"
         xray_path.chmod(0o755)
         
-        # Verify it works
+        # Test it
         result = subprocess.run([str(xray_path), "-version"], capture_output=True)
         if result.returncode == 0:
             color_print("[✓] Xray core downloaded and working", Fore.GREEN)
@@ -665,15 +672,6 @@ def git_commit_and_push():
 def main():
     global stop_processing
     stop_processing = False
-    
-    # Setup colorama
-    try:
-        from colorama import init, Fore, Style
-        init(autoreset=True)
-    except ImportError:
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'colorama'])
-        from colorama import init, Fore, Style
-        init(autoreset=True)
     
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("V2RAY MANAGER - GitHub Actions Optimized", Fore.YELLOW, Style.BRIGHT)
