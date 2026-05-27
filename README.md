@@ -4,67 +4,51 @@
 این کدها با کمک **Vibe Coding** و با نظارت انسان با هوش مصنوعی ساخته شده‌اند.
 
 ## نحوه جمع‌آوری خودکار لینک‌های اشتراک
-لینک‌های سابسکریپشن (`pool_address.txt`) هر ۵ روز یکبار با جستجو در ریپازیتوری‌های گیت‌هاب مرتبط با ایران یافت می‌شوند ( فقط لینک‌هایی که در ۵ روز گذشته بروز شده باشند انتخاب می‌گردند).  
-کانفیگ‌های درون همه لینکها استخراج شده و همه کانفیگ‌های تکراری حذف می‌شوند سپس تمام کانفیگ‌های باقیمانده تست می‌شوند و در نهایت در فایل `success_config.txt` فقط کانفیگ‌هایی که در تست سالم تشخیص داده شده‌اند ذخیره می‌گردد تا شما بتوانید به‌راحتی از آنها استفاده کنید.
+لینک‌های سابسکریپشن (`pool_address.txt`) هر ۵ روز یکبار با جستجو در ریپازیتوری‌های گیت‌هاب مرتبط با ایران یافت می‌شوند ( فقط لینک‌هایی که در ۵ روز گذشته بروز شده باشند انتخاب می‌گردند). ( بنابراین همیشه لینکهای جدید جایگزین لینکهای قدیمی میشوند)
 
-لینک زیر شامل **<u>94612 کانفیگ تست‌شده و فعال</u>** است که در بیش از **<u>759 لینک سابسکریپشن</u>** و در مجموع از بین **<u>825070 کانفیگ مختلف</u>** تکراری و خراب تست و استخراج شده‌اند.
+کانفیگ‌های درون همه لینکها استخراج شده و همه کانفیگ‌های تکراری حذف می‌شوند سپس تمام کانفیگ‌های باقیمانده تست می‌شوند و در نهایت **۲۰۰۰ تا از سریعترین کانفیگها** در فایل `success_config.txt` ذخیره می‌گردد تا شما بتوانید به‌راحتی از آنها استفاده کنید.
 
-برای استفاده از کانفیگ‌های سالم، فقط کافی است لینک زیر را در نرم‌افزار های کلاینت V2Ray خود وارد کنید:  
-👉 [https://github.com/kagemoosha/sub-link-checker/blob/main/success_config.txt](https://github.com/kagemoosha/sub-link-checker/blob/main/success_config.txt)
+لینک زیر شامل **۲۰۰۰ کانفیگ تست‌شده و فعال** است که از **26 لینک سابسکریپشن** و در مجموع از بین **110587 کانفیگ مختلف** تکراری و خراب تست و استخراج شده‌اند.
+
+برای استفاده از کانفیگ‌های سالم، فقط کافی است لینک زیر را در نرم‌افزار های کلاینت V2Ray خود وارد کنید:
+
+<div style="text-align: center; margin: 20px 0;">
+    <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=https://github.com/Triton-ix/sub-link-checker/blob/main/success_config.txt" alt="QR Code" style="display: inline-block;">
+</div>
+
+<div style="text-align: center; direction: ltr; background-color: #f5f5f5; padding: 10px; border-radius: 5px; display: inline-block; width: 100%;">
+    <code style="font-size: 14px; word-break: break-all;">https://github.com/Triton-ix/sub-link-checker/blob/main/success_config.txt</code>
+    <button onclick="navigator.clipboard.writeText('https://github.com/Triton-ix/sub-link-checker/blob/main/success_config.txt')" style="margin-right: 10px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer;">📋 کپی</button>
+</div>
 
 ## گزارش خودکار وضعیت کانفیگ‌ها
 
-**آخرین بروزرسانی :** همین الان
-
+**📅 آخرین بروزرسانی :** 1405/03/07 01:18:54
 
 <div dir="rtl" style="text-align: center; overflow-x: auto;">
-<table style="margin-left: auto; margin-right: auto; border-collapse: collapse; width: 100%; text-align: center;">
+<table style="margin-left: auto; margin-right: auto; border-collapse: collapse; width: 80%; text-align: center;">
 <thead>
 <tr style="background-color: #f2f2f2;">
 <th>آیتم</th>
-<th>🔗 کل لینکهای SUB</th>
 <th>✅ لینک‌های سالم</th>
-<th>❌ لینک‌های خراب</th>
 <th>📥 کل کانفیگ‌ها</th>
-<th>🗑️ کانفیگ‌ تکراری</th>
-<th>🔄 کانفیگ‌ بدون تکرار</th>
-<th>🔴 کانفیگ‌ خراب</th>
-<th>🟢 کانفیگ‌ تست شده</th>
+<th>🔄 کانفیگ‌ ها بدون تکرار</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td style="font-weight: bold;">تعداد</td>
-<td>759</td>
-<td>759</td>
-<td>0</td>
-<td>825070</td>
-<td>436344</td>
-<td>388726</td>
-<td>294114</td>
-<td>94612</td>
-</tr>
-<tr>
-<td style="font-weight: bold;">درصد</td>
-<td>100%</td>
-<td>100.0%</td>
-<td>0.0%</td>
-<td>100%</td>
-<td>52.9%</td>
-<td>47.1%</td>
-<td>75.7%</td>
-<td>24.3%</td>
+<td>26</td>
+<td>110587</td>
+<td>109613</td>
 </tr>
 </tbody>
 </table>
 </div>
-<p style="text-align: center;">درصد کانفیگ‌ها نسبت به کل کانفیگ‌های بدون تکرار محاسبه شده است.<br>
-کانفیگ‌های تست شده فقط کانفیگ‌هایی هستند که در تست سریع زیر ۳۰۰ میلی ثانیه پینگ داده‌اند.</p>
-
 
 ## فایل‌های خروجی
-- `pool_address.txt` : لینک های سابسکرایب پیدا شده  
-- `cleaned_configs.txt` : کانفیگ‌های یکتا  
-- `success_config.txt` : کانفیگ‌های سالم (تست شده)
+- `pool_address.txt` : لینک های سابسکرایب پیدا شده
+- `cleaned_configs.txt` : کانفیگ‌های یکتا
+- `success_config.txt` : تعداد ۲۰۰۰ کانفیگ منتخب با بالاترین پینگ (تست شده)
 
 </div>
