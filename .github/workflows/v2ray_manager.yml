@@ -2,7 +2,7 @@ name: V2Ray Manager
 
 on:
   schedule:
-    - cron: '0 0 */2 * *'   # Every 2 days at 00:00 UTC
+    - cron: '0 0 */2 * *'
   workflow_dispatch:
 
 env:
@@ -13,25 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests urllib3 colorama
-
       - name: Run V2Ray Manager
         run: python v2ray_manager.py
-
-      - name: Final commit (if needed)
+      - name: Final commit
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
