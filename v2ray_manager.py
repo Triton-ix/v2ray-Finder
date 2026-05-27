@@ -16,6 +16,7 @@ import urllib.parse
 import tempfile
 import zipfile
 import platform
+import warnings
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -343,7 +344,7 @@ def fetch_all_configs(subscription_links):
 
 
 # ============================================================
-# بخش 3: تست کانفیگ با Xray Core (ساده شده برای گیت‌هاب)
+# بخش 3: تست کانفیگ با Xray Core
 # ============================================================
 
 def download_xray_core(vendor_path: Path) -> bool:
@@ -712,6 +713,8 @@ def main():
         
     except Exception as e:
         color_print(f"\n[ERROR] {e}", Fore.RED)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
