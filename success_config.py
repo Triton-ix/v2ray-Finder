@@ -28,6 +28,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 stop_testing = False
 
+# لیست برای ذخیره کانفیگ‌ها با زمان پاسخشان
+working_configs_with_time = []
+
 def signal_handler(sig, frame):
     global stop_testing
     stop_testing = True
@@ -38,9 +41,10 @@ signal.signal(signal.SIGINT, signal_handler)
 def color_print(text, color=Fore.WHITE, style=Style.NORMAL):
     print(f"{style}{color}{text}{Style.RESET_ALL}")
 
-def test_single_config(line, timeout=0.3):   # <-- تغییر زمان از 1 به 0.3 ثانیه (300 میلی‌ثانیه)
+def test_single_config(line, timeout=1):
+    """تست کانفیگ و برگرداندن (کانفیگ, سالم, زمان پاسخ به میلی‌ثانیه)"""
     if stop_testing or not line.strip():
-        return line, False
+        return line, False, None
     try:
         host, port = None, None
         if line.startswith('vless://'):
@@ -70,13 +74,15 @@ def test_single_config(line, timeout=0.3):   # <-- تغییر زمان از 1 ب
             with requests.Session() as sess:
                 sess.headers.update(HEADERS)
                 sess.verify = False
-                r = sess.get(url, timeout=timeout)   # زمان timeout اعمال می‌شود
+                start_time = time.time()
+                r = sess.get(url, timeout=timeout)
+                elapsed_ms = (time.time() - start_time) * 1000  # تبدیل به میلی‌ثانیه
                 if r.status_code < 500:
                     time.sleep(random.uniform(0.05, 0.2))
-                    return line, True
-        return line, False
-    except:
-        return line, False
+                    return line, True, elapsed_ms
+        return line, False, None
+    except Exception as e:
+        return line, False, None
 
 def read_configs(fname):
     try:
@@ -86,9 +92,28 @@ def read_configs(fname):
         color_print(f"Error: {fname} not found!", Fore.RED)
         return []
 
-def append_working(cfg, outfile):
-    with open(outfile, 'a', encoding='utf-8') as f:
-        f.write(cfg + '\n')
+def save_top_configs(output_file, top_n=2000):
+    """ذخیره N کانفیگ برتر بر اساس زمان پاسخ (سریع‌ترین‌ها)"""
+    global working_configs_with_time
+    if not working_configs_with_time:
+        color_print("[!] No working configs found!", Fore.YELLOW)
+        return 0
+    
+    # مرتب‌سازی بر اساس زمان پاسخ (صعودی - سریع‌ترین اول)
+    working_configs_with_time.sort(key=lambda x: x[1])
+    
+    # گرفتن N تای اول
+    top_configs = working_configs_with_time[:top_n]
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for config, response_time, _ in top_configs:
+            f.write(config + '\n')
+    
+    color_print(f"[✓] Saved {len(top_configs)} fastest configs (out of {len(working_configs_with_time)} working) to {output_file}", Fore.GREEN)
+    if len(working_configs_with_time) > top_n:
+        color_print(f"[*] Fastest response time: {top_configs[0][1]:.1f}ms | Slowest in top {top_n}: {top_configs[-1][1]:.1f}ms", Fore.CYAN)
+    
+    return len(top_configs)
 
 def git_commit_push():
     try:
@@ -110,27 +135,28 @@ def git_commit_push():
         color_print(f"[!] Git error: {e}", Fore.RED)
 
 def main():
+    global working_configs_with_time
+    working_configs_with_time = []  # reset
+    
     color_print("="*60, Fore.CYAN)
-    color_print("V2RAY TESTER (BATCH 7000, AUTO-COMMIT)", Fore.YELLOW, Style.BRIGHT)
+    color_print("V2RAY TESTER (SAVE TOP 2000 FASTEST CONFIGS)", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
 
     input_file = 'cleaned_configs.txt'
     out_file = 'success_config.txt'
-    if os.path.exists(out_file):
-        os.remove(out_file)
-
+    
     configs = read_configs(input_file)
     if not configs:
         color_print("No configs to test!", Fore.RED)
         sys.exit(1)
 
     total = len(configs)
-    color_print(f"[*] Total unique configs: {total}", Fore.GREEN)
+    color_print(f"[*] Total unique configs to test: {total}", Fore.GREEN)
+    color_print(f"[*] Will save only the {2000} fastest working configs", Fore.CYAN)
 
     BATCH = 7000
     WORKERS = 10
-    WORKER_TIMEOUT = 0.5   # زمان انتظار برای future (باید کمی بیشتر از timeout اصلی باشد)
-    # توجه: timeout تست 0.3 ثانیه است، future می‌تواند 0.5 ثانیه صبر کند
+    TIMEOUT = 1
 
     working_total = 0
     processed = 0
@@ -145,32 +171,34 @@ def main():
         color_print(f"\n[Batch {batch_num}] Testing {start+1}-{end} ({len(batch_configs)} items)...", Fore.CYAN)
 
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            futures = {ex.submit(test_single_config, cfg, 0.3): cfg for cfg in batch_configs}
+            futures = {ex.submit(test_single_config, cfg, TIMEOUT): cfg for cfg in batch_configs}
             for fut in as_completed(futures):
                 if stop_testing:
                     ex.shutdown(wait=False)
                     break
                 try:
-                    cfg, ok = fut.result(timeout=WORKER_TIMEOUT)
+                    cfg, ok, response_time = fut.result(timeout=TIMEOUT+0.5)
                 except:
                     cfg = futures[fut]
                     ok = False
+                    response_time = None
+                
                 processed += 1
                 if ok:
                     working_total += 1
                     batch_working += 1
-                    append_working(cfg, out_file)
+                    working_configs_with_time.append((cfg, response_time, 0))
+                
                 pct = (working_total / processed * 100) if processed else 0
                 mark = "✓" if ok else "✗"
                 col = Fore.GREEN if ok else Fore.RED
-                print(f"\r[{processed}/{total} ({pct:.1f}%)] Working: {working_total}  {col}{mark}{Style.RESET_ALL}", end='', flush=True)
+                print(f"\r[{processed}/{total} ({pct:.1f}%)] Working found: {working_total}  {col}{mark}{Style.RESET_ALL}", end='', flush=True)
 
         color_print(f"\n[Batch {batch_num}] Working in batch: {batch_working}/{len(batch_configs)}", Fore.MAGENTA)
         batch_num += 1
 
-        color_print("[*] Updating README and committing...", Fore.CYAN)
-        subprocess.run([sys.executable, "update_readme.py"], check=False)
-        git_commit_push()
+        # بعد از هر بسته، وضعیت فعلی را نشان بده (بدون ذخیره نهایی)
+        color_print(f"[*] Fastest config so far: {min([t for _, t, _ in working_configs_with_time]) if working_configs_with_time else 0:.1f}ms", Fore.CYAN)
 
         if end < total:
             slp = random.uniform(1.0, 2.0)
@@ -178,14 +206,24 @@ def main():
             time.sleep(slp)
 
     print()
-    color_print(f"\n[✓] Done. Working configs: {working_total}/{total}", Fore.GREEN)
+    color_print(f"\n[✓] Testing completed. Total working configs found: {working_total}/{total}", Fore.GREEN)
+    
+    # ذخیره فقط ۲۰۰۰ کانفیگ سریعتر
+    saved_count = save_top_configs(out_file, top_n=2000)
+    
+    # به‌روزرسانی README و commit نهایی
+    color_print("[*] Updating README and committing final results...", Fore.CYAN)
+    subprocess.run([sys.executable, "update_readme.py"], check=False)
+    git_commit_push()
+    
     color_print("="*60, Fore.CYAN)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        color_print("\n[!] Interrupted, saved partial results.", Fore.YELLOW)
+        color_print("\n[!] Interrupted, saving partial results...", Fore.YELLOW)
+        save_top_configs('success_config.txt', top_n=2000)
         git_commit_push()
     except Exception as e:
         color_print(f"\n[ERROR] {e}", Fore.RED)
