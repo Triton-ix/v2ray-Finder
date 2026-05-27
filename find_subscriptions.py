@@ -2,9 +2,14 @@ import requests
 import re
 import time
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
+
+# ========== تنظیمات قابل تغییر توسط شما ==========
+DAYS_TO_CHECK = 2              # تعداد روزهای گذشته برای جستجو (لینک‌های بروز شده در این مدت)
+MAX_PAGES_PER_QUERY = 2        # تعداد صفحات جستجو (کمتر = سریعتر، اما لینک‌های کمتری پیدا می‌شود)
+MAX_WORKERS = 10               # تعداد همزمانی برای بررسی ریپازیتوری‌ها
+# =================================================
 
 class V2RaySubscriptionFinder:
     def __init__(self):
@@ -17,7 +22,7 @@ class V2RaySubscriptionFinder:
         self.subscription_links = set()
         self.seen_repos = set()
         
-        self.iran_keywords = ['iran', 'ایران', 'ir', 'persia', 'persian', 'فارسی', 'farsi']
+        self.iran_keywords = ['iran', 'ایران', 'ir', 'persia', 'فارسی', 'farsi']
         
         self.sub_patterns = [
             r'(https?://raw\.githubusercontent\.com/[^\s"\'<>]+\.(txt|json|yml|yaml|link))',
@@ -32,7 +37,6 @@ class V2RaySubscriptionFinder:
             r'config.*[\'"]?(https?://raw\.githubusercontent\.com[^\s\'"]+)[\'"]?',
         ]
 
-    # ---------- Date parsing utilities (robust day/month/year detection) ----------
     def _parse_relative_date(self, text):
         text = text.lower()
         now = datetime.now()
@@ -85,23 +89,26 @@ class V2RaySubscriptionFinder:
             return rel
         return self._parse_absolute_date(date_string)
 
-    def is_within_5_days(self, date_obj):
-        """Check if given datetime is within last 5 days"""
+    def is_within_days(self, date_obj):
+        """بررسی بروز بودن در تعداد روزهای مشخص شده"""
         if not date_obj:
             return False
         now = datetime.now(date_obj.tzinfo) if date_obj.tzinfo else datetime.now()
-        return (now - date_obj) <= timedelta(days=5)   # <-- تغییر از 15 به 5
+        return (now - date_obj) <= timedelta(days=DAYS_TO_CHECK)
 
-    def search_github_repos(self, max_pages=5):
+    def search_github_repos(self):
         repos = []
         search_queries = [
-            'v2ray subscription iran', 'v2ray config iran', 'v2ray reality iran',
-            'کانفیگ v2ray ایران', 'v2ray free config', 'v2ray subscription link',
-            'v2ray collector', 'v2ray configs daily', 'iran v2ray configs',
+            'v2ray subscription iran', 'v2ray config iran',
+            'کانفیگ v2ray ایران', 'v2ray subscription link',
+            'v2ray collector', 'iran v2ray configs',
             'v2ray sub', 'vless subscription', 'vmess subscription',
         ]
+        
+        print(f"Searching GitHub for Iran-related repos (last {DAYS_TO_CHECK} days)...")
+        
         for q in search_queries:
-            for page in range(1, max_pages + 1):
+            for page in range(1, MAX_PAGES_PER_QUERY + 1):
                 try:
                     url = f'https://api.github.com/search/repositories?q={q}&page={page}&per_page=30&sort=updated&order=desc'
                     resp = self.session.get(url, timeout=15)
@@ -118,8 +125,9 @@ class V2RaySubscriptionFinder:
                                     'updated_at': repo.get('updated_at', ''),
                                 })
                     elif resp.status_code == 403:
+                        # اگر API rate limit خورد، از scraping استفاده کن
                         self._scrape_github_search(q, page, repos)
-                    time.sleep(1.2)
+                    time.sleep(0.5)  # کاهش تاخیر بین درخواست‌ها
                 except Exception as e:
                     print(f"Search error: {e}")
         return repos
@@ -196,7 +204,7 @@ class V2RaySubscriptionFinder:
             for path in paths:
                 raw = f'https://raw.githubusercontent.com/{repo_path}/{branch}/{path}'
                 try:
-                    resp = self.session.get(raw, timeout=10)
+                    resp = self.session.get(raw, timeout=8)
                     if resp.status_code == 200:
                         content = resp.text
                         for pat in self.sub_patterns:
@@ -222,13 +230,13 @@ class V2RaySubscriptionFinder:
         for subdir in dirs:
             url = f'{api_base}/contents/{subdir}?ref={default_branch}'
             try:
-                resp = self.session.get(url, timeout=10)
+                resp = self.session.get(url, timeout=8)
                 if resp.status_code == 200:
                     items = resp.json()
                     if isinstance(items, list):
                         for item in items:
                             if item['type'] == 'file' and item['name'].lower().endswith(('.txt','.json','.yaml','.yml','.md','.link')):
-                                file_resp = self.session.get(item['download_url'], timeout=10)
+                                file_resp = self.session.get(item['download_url'], timeout=8)
                                 if file_resp.status_code == 200:
                                     for pat in self.sub_patterns:
                                         matches = re.findall(pat, file_resp.text, re.IGNORECASE)
@@ -256,42 +264,52 @@ class V2RaySubscriptionFinder:
                 last_date = self._get_last_update_from_page(soup)
             if not last_date:
                 last_date = self.parse_date(repo_info.get('updated_at', ''))
-            if not last_date or not self.is_within_5_days(last_date):   # <-- تغییر معیار به 5 روز
+            if not last_date or not self.is_within_days(last_date):
                 return False
             links = self._extract_links_from_repo(repo_url)
             links.update(self._scan_repo_contents(repo_url))
             if links:
                 self.subscription_links.update(links)
-                print(f"Found {len(links)} links in {repo_url} (last update: {last_date})")
+                print(f"✓ Found {len(links)} links in {repo_url[:50]}...")
                 return True
         except Exception as e:
-            print(f"Error checking {repo_url}: {e}")
+            pass
         return False
 
     def find_valid_subscriptions(self):
-        print("Searching GitHub for Iran-related V2Ray subscription repos (last 5 days)...")
-        repos = self.search_github_repos(max_pages=5)
+        print("="*50)
+        print("V2RAY SUBSCRIPTION FINDER")
+        print(f"Looking for repos updated in last {DAYS_TO_CHECK} days")
+        print("="*50)
+        
+        repos = self.search_github_repos()
         print(f"Found {len(repos)} candidate repositories. Checking...")
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             futures = {ex.submit(self.check_repository, repo): repo for repo in repos}
             for f in as_completed(futures):
                 try:
                     f.result()
                 except:
                     pass
+        
+        print(f"Found {len(self.subscription_links)} subscription links. Validating...")
+        
         valid = []
         for link in self.subscription_links:
             try:
-                head = self.session.head(link, timeout=8)
+                head = self.session.head(link, timeout=5)
                 if head.status_code < 400:
                     valid.append(link)
             except:
                 pass
+        
         unique = list(set(valid))
         with open('pool_address.txt', 'w', encoding='utf-8') as f:
             for line in unique:
                 f.write(line + '\n')
-        print(f"Done. Saved {len(unique)} unique valid subscription links to pool_address.txt")
+        
+        print(f"\n✅ Done! Saved {len(unique)} unique valid subscription links to pool_address.txt")
         return unique
 
 if __name__ == "__main__":
