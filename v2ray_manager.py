@@ -34,6 +34,7 @@ import urllib3
 SUBSCRIPTION_SEARCH_DAYS_BACK = 2          # جستجوی لینک‌هایی که در X روز گذشته بروز شده‌اند
 SUBSCRIPTION_MAX_SEARCH_PAGES = 10         # حداکثر تعداد صفحات جستجو (هر صفحه 30 نتیجه)
 SUBSCRIPTION_MAX_WORKERS = 3               # تعداد همزمانی برای بررسی ریپازیتوری‌ها
+MAX_LINKS_PER_REPO = 1                     # حداکثر تعداد لینک از هر ریپازیتوری (برای تنوع)
 
 # تنظیمات تست کانفیگ
 MAX_FASTEST_CONFIGS = 2000                 # تعداد کانفیگ‌های نهایی که ذخیره می‌شوند
@@ -132,7 +133,7 @@ TEST_URL = XRAY_SETTINGS["core"].get("test_url", "http://connectivitycheck.gstat
 
 
 # ============================================================
-# بخش 1: یافتن لینک‌های اشتراک
+# بخش 1: یافتن لینک‌های اشتراک با تنوع بالا
 # ============================================================
 
 def is_within_days(date_obj, days):
@@ -143,6 +144,7 @@ def is_within_days(date_obj, days):
 
 
 def search_github_repos(session, seen_repos):
+    """Search GitHub for Iran-related repositories"""
     repos = []
     search_queries = [
         'v2ray subscription iran',
@@ -150,6 +152,10 @@ def search_github_repos(session, seen_repos):
         'کانفیگ v2ray ایران',
         'v2ray free config',
         'iran v2ray',
+        'vless config iran',
+        'vmess config iran',
+        'free v2ray iran',
+        'v2ray iran telegram',
     ]
     
     for q in search_queries:
@@ -182,6 +188,7 @@ def search_github_repos(session, seen_repos):
                                 repos.append({
                                     'name': name,
                                     'url': repo['html_url'],
+                                    'updated_at': updated_at
                                 })
                 elif resp.status_code == 403:
                     print(f"Rate limit hit for query '{q}', stopping...")
@@ -196,12 +203,14 @@ def search_github_repos(session, seen_repos):
 
 
 def extract_links_from_repo(session, repo_url, patterns):
+    """Extract subscription links from repository files - returns list of unique domains"""
     links = set()
     repo_path = repo_url.replace('https://github.com/', '')
     
     paths_to_check = [
         'README.md', 'sub.txt', 'subscription.txt', 'config.txt',
-        'v2ray.txt', 'links.txt', 'urls.txt'
+        'v2ray.txt', 'links.txt', 'urls.txt', 'nodes.txt',
+        'README_Fa.md', 'README_fa.md', 'docs/README.md'
     ]
     
     for branch in ['main', 'master']:
@@ -221,11 +230,27 @@ def extract_links_from_repo(session, repo_url, patterns):
                                     links.add(m)
             except:
                 continue
-    return links
+    return list(links)
 
 
-def check_repository(session, repo_info, patterns, keywords, subscription_links):
+def get_domain_from_url(url: str) -> str:
+    """Extract domain from URL for deduplication"""
+    try:
+        parsed = urlparse(url)
+        # Extract repository path
+        match = re.search(r'github\.com/([^/]+/[^/]+)', url)
+        if match:
+            return match.group(1)
+        return parsed.netloc
+    except:
+        return url
+
+
+def check_repository(session, repo_info, patterns, keywords, all_links_dict):
+    """Check a single repository and extract links - limit per repo"""
     repo_url = repo_info['url']
+    repo_name = repo_info['name']
+    
     try:
         repo_path = repo_url.replace('https://github.com/', '')
         api_url = f'https://api.github.com/repos/{repo_path}'
@@ -243,11 +268,20 @@ def check_repository(session, repo_info, patterns, keywords, subscription_links)
         if not has_iran:
             return False
         
+        # Extract links from this repository
         links = extract_links_from_repo(session, repo_url, patterns)
         
         if links:
-            subscription_links.update(links)
-            print(f"  Found {len(links)} links in {repo_path}")
+            # Limit links per repository
+            if repo_name not in all_links_dict:
+                all_links_dict[repo_name] = []
+            
+            # Add only up to MAX_LINKS_PER_REPO links from this repo
+            for link in links[:MAX_LINKS_PER_REPO]:
+                if link not in all_links_dict[repo_name]:
+                    all_links_dict[repo_name].append(link)
+            
+            print(f"  Found {len(links[:MAX_LINKS_PER_REPO])} link(s) from {repo_name}")
             return True
     except Exception as e:
         print(f"  Error checking {repo_url}: {e}")
@@ -255,6 +289,7 @@ def check_repository(session, repo_info, patterns, keywords, subscription_links)
 
 
 def find_subscription_links():
+    """Main function to find subscription links with diversity"""
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("STEP 1: Finding subscription links from GitHub", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
@@ -263,6 +298,7 @@ def find_subscription_links():
     session.headers.update(HEADERS)
     
     print(f"[*] Searching for Iran-related repos (last {SUBSCRIPTION_SEARCH_DAYS_BACK} days)...")
+    print(f"[*] Max {MAX_LINKS_PER_REPO} link(s) per repository for diversity\n")
     
     seen_repos = set()
     repos = search_github_repos(session, seen_repos)
@@ -273,10 +309,12 @@ def find_subscription_links():
         return []
     
     print("[*] Checking repositories for subscription links...")
-    subscription_links = set()
+    
+    # Dictionary to store links per repository
+    all_links_dict = {}
     
     with ThreadPoolExecutor(max_workers=SUBSCRIPTION_MAX_WORKERS) as executor:
-        futures = {executor.submit(check_repository, session, repo, SUBSCRIPTION_PATTERNS, IRAN_KEYWORDS, subscription_links): repo for repo in repos}
+        futures = {executor.submit(check_repository, session, repo, SUBSCRIPTION_PATTERNS, IRAN_KEYWORDS, all_links_dict): repo for repo in repos}
         for future in as_completed(futures):
             if stop_processing:
                 break
@@ -285,21 +323,46 @@ def find_subscription_links():
             except:
                 pass
     
-    print(f"[*] Validating {len(subscription_links)} extracted links...")
+    # Collect all unique links from all repositories
+    all_links = []
+    for repo_name, links in all_links_dict.items():
+        for link in links:
+            all_links.append(link)
+    
+    print(f"\n[*] Total unique repositories with links: {len(all_links_dict)}")
+    print(f"[*] Total links collected: {len(all_links)}")
+    
+    # Validate links
+    print(f"[*] Validating links...")
     valid_links = []
     
-    for link in list(subscription_links):
+    for link in all_links:
         if stop_processing:
             break
         try:
             resp = session.head(link, timeout=8)
             if resp.status_code < 400:
                 valid_links.append(link)
-        except:
-            pass
+                print(f"  ✓ Valid: {link[:80]}...")
+            else:
+                print(f"  ✗ Invalid: {link[:80]}...")
+        except Exception as e:
+            print(f"  ✗ Error: {link[:80]}... - {str(e)[:30]}")
     
     unique_links = list(set(valid_links))
-    print(f"[✓] Found {len(unique_links)} valid subscription links")
+    print(f"\n[✓] Found {len(unique_links)} valid unique subscription links from {len(all_links_dict)} different repositories")
+    
+    # Show sample of links with their sources
+    if unique_links:
+        print("\n[📋] Sample links from different sources:")
+        for i, link in enumerate(unique_links[:10], 1):
+            # Find which repo this link came from
+            source = "unknown"
+            for repo_name, repo_links in all_links_dict.items():
+                if link in repo_links:
+                    source = repo_name
+                    break
+            print(f"  {i}. {source}: {link[:70]}...")
     
     return unique_links
 
@@ -315,7 +378,7 @@ def fetch_configs_from_link(session, url):
         content = resp.text.strip().splitlines()
         return [line.strip() for line in content if line.strip()]
     except Exception as e:
-        print(f"  Failed: {url[:50]}...")
+        print(f"  Failed: {url[:50]}... - {str(e)[:30]}")
         return []
 
 
@@ -329,6 +392,7 @@ def fetch_all_configs(subscription_links):
     
     all_configs = []
     total_fetched = 0
+    successful_links = 0
     
     for i, link in enumerate(subscription_links, 1):
         if stop_processing:
@@ -336,13 +400,18 @@ def fetch_all_configs(subscription_links):
         print(f"[{i}/{len(subscription_links)}] Fetching: {link[:60]}...")
         configs = fetch_configs_from_link(session, link)
         if configs:
-            print(f"    Found {len(configs)} configs")
+            successful_links += 1
+            print(f"    ✓ Found {len(configs)} configs")
             total_fetched += len(configs)
             all_configs.extend(configs)
+        else:
+            print(f"    ✗ No configs found")
         time.sleep(random.uniform(0.3, 0.8))
     
-    print(f"\n[*] Total configs fetched: {total_fetched}")
+    print(f"\n[*] Successful links: {successful_links}/{len(subscription_links)}")
+    print(f"[*] Total configs fetched: {total_fetched}")
     
+    # Deduplicate
     unique_configs = list(set(all_configs))
     duplicates_removed = total_fetched - len(unique_configs)
     print(f"[*] Unique configs: {len(unique_configs)}")
@@ -360,7 +429,6 @@ def download_xray_core(vendor_path: Path) -> bool:
     try:
         color_print("[*] Downloading Xray core for Linux x86_64...", Fore.CYAN)
         
-        # Simple download using requests
         download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
         resp = requests.get(download_url, timeout=120)
         resp.raise_for_status()
@@ -369,17 +437,14 @@ def download_xray_core(vendor_path: Path) -> bool:
         with open(zip_path, 'wb') as f:
             f.write(resp.content)
         
-        # Extract
         with zipfile.ZipFile(zip_path, 'r') as zipf:
             zipf.extractall(vendor_path)
         
         zip_path.unlink()
         
-        # Make executable
         xray_path = vendor_path / "xray"
         xray_path.chmod(0o755)
         
-        # Test it
         result = subprocess.run([str(xray_path), "-version"], capture_output=True)
         if result.returncode == 0:
             color_print("[✓] Xray core downloaded and working", Fore.GREEN)
@@ -462,11 +527,9 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
         }
     }
     
-    # Remove None values
     if config["inbounds"][0]["sniffing"] is None:
         del config["inbounds"][0]["sniffing"]
     
-    # Build outbound
     if parsed['protocol'] == 'vless':
         outbound = {
             "protocol": "vless",
@@ -514,7 +577,6 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
     else:
         return None
     
-    # Add fragment if enabled
     if core_settings.get("fragment", {}).get("enabled", False):
         frag = core_settings["fragment"]
         outbound["streamSettings"] = {
@@ -553,7 +615,6 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
             stderr=subprocess.DEVNULL
         )
         
-        # Wait for port
         time.sleep(2)
         
         proxies = {
@@ -594,7 +655,6 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
     print(f"[*] Goal: {MAX_FASTEST_CONFIGS} configs under {MAX_RESPONSE_TIME_MS}ms")
     print(f"[*] Will stop when target reached\n")
     
-    # Setup Xray
     project_root = Path(__file__).parent.resolve()
     vendor_path = project_root / "vendor"
     vendor_path.mkdir(exist_ok=True)
@@ -606,7 +666,6 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
             color_print("[!] Xray setup failed", Fore.RED)
             return 0
     
-    # Shuffle and test
     random.shuffle(unique_configs)
     
     fastest_configs = []
@@ -637,7 +696,6 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
         color_print("[!] No working configs found!", Fore.RED)
         return 0
     
-    # Save results
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         for _, config_line in fastest_configs:
             f.write(config_line + '\n')
@@ -680,22 +738,18 @@ def main():
     start_time = time.time()
     
     try:
-        # Step 1: Find subscription links
         subscription_links = find_subscription_links()
         if not subscription_links:
             color_print("\n[!] No subscription links found", Fore.RED)
             sys.exit(1)
         
-        # Step 2: Fetch and deduplicate configs
         unique_configs = fetch_all_configs(subscription_links)
         if not unique_configs:
             color_print("\n[!] No configs extracted", Fore.RED)
             sys.exit(1)
         
-        # Step 3: Test configs and save fastest
         saved_count = test_configs_and_save(unique_configs)
         
-        # Summary
         elapsed = time.time() - start_time
         color_print("\n" + "="*60, Fore.CYAN)
         color_print("SUMMARY", Fore.YELLOW, Style.BRIGHT)
