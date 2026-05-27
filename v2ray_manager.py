@@ -9,9 +9,17 @@ import re
 import time
 import random
 import signal
-import warnings
+import socket
+import logging
+import base64
+import urllib.parse
+import tempfile
+import zipfile
+import platform
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Optional, List, Set, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -27,11 +35,10 @@ SUBSCRIPTION_MAX_SEARCH_PAGES = 10         # حداکثر تعداد صفحات 
 SUBSCRIPTION_MAX_WORKERS = 3               # تعداد همزمانی برای بررسی ریپازیتوری‌ها
 
 # تنظیمات تست کانفیگ
-RANDOM_SAMPLE_SIZE = 20000                 # تعداد کانفیگ‌هایی که به صورت رندوم تست می‌شوند
 MAX_FASTEST_CONFIGS = 2000                 # تعداد کانفیگ‌های نهایی که ذخیره می‌شوند
-TEST_TIMEOUT_SECONDS = 2                   # حداکثر زمان تست هر کانفیگ (ثانیه)
-TEST_MAX_WORKERS = 10                      # تعداد همزمانی برای تست کانفیگ‌ها
-TEST_BATCH_SIZE = 1000                     # اندازه دسته برای نمایش پیشرفت
+MAX_RESPONSE_TIME_MS = 150                 # حداکثر زمان پاسخ قابل قبول (میلی‌ثانیه)
+MAX_WORKERS = 5                            # تعداد همزمانی برای تست کانفیگ‌ها
+CONFIG_FILE = "config.json"                # فایل تنظیمات Xray
 
 # تنظیمات فایل خروجی
 OUTPUT_FILE = "Triton-ix.txt"              # نام فایل خروجی نهایی
@@ -57,6 +64,7 @@ HEADERS = {
 warnings.filterwarnings('ignore')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 stop_processing = False
 
 def signal_handler(sig, frame):
@@ -67,21 +75,52 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 
-def install_packages():
-    """Install required packages if not present"""
-    for pkg in ['colorama', 'requests', 'urllib3']:
-        try:
-            __import__(pkg)
-        except ImportError:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
-
-install_packages()
-from colorama import init, Fore, Style
-init(autoreset=True)
-
-
 def color_print(text, color=Fore.WHITE, style=Style.NORMAL):
     print(f"{style}{color}{text}{Style.RESET_ALL}")
+
+
+# ============================================================
+# تنظیمات Xray از فایل config.json
+# ============================================================
+
+def load_xray_config() -> dict:
+    """Load Xray settings from config.json"""
+    default_config = {
+        "core": {
+            "test_url": "http://connectivitycheck.gstatic.com/generate_204",
+            "log_level": "warning",
+            "domain_strategy": "IPIFNonMatch",
+            "allow_insecure_tls": False,
+            "sniffing_enabled": True,
+            "inbound_ports": {"socks": 10808, "http": 10809},
+            "dns": {
+                "enabled": True,
+                "fake_dns_enabled": True,
+                "local_port": 10853,
+                "remote_server": "https://8.8.8.8/dns-query",
+                "domestic_server": "1.1.1.2"
+            },
+            "fragment": {"enabled": True, "packets": "tlshello", "length": "10-30", "interval": "1-5"},
+            "mux": {"enabled": False, "concurrency": 8}
+        }
+    }
+    
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                # Merge with defaults
+                if "core" in user_config:
+                    default_config["core"].update(user_config["core"])
+                return default_config
+        except Exception as e:
+            print(f"[!] Error loading config.json: {e}, using defaults")
+    
+    return default_config
+
+
+XRAY_SETTINGS = load_xray_config()
+TEST_URL = XRAY_SETTINGS["core"].get("test_url", "http://connectivitycheck.gstatic.com/generate_204")
 
 
 # ============================================================
@@ -89,7 +128,6 @@ def color_print(text, color=Fore.WHITE, style=Style.NORMAL):
 # ============================================================
 
 def is_within_days(date_obj, days):
-    """Check if date is within specified days"""
     if not date_obj:
         return False
     now = datetime.now(date_obj.tzinfo) if date_obj.tzinfo else datetime.now()
@@ -97,7 +135,6 @@ def is_within_days(date_obj, days):
 
 
 def search_github_repos(session, seen_repos):
-    """Search GitHub for Iran-related repositories"""
     repos = []
     search_queries = [
         'v2ray subscription iran',
@@ -151,7 +188,6 @@ def search_github_repos(session, seen_repos):
 
 
 def extract_links_from_repo(session, repo_url, patterns):
-    """Extract subscription links from repository files"""
     links = set()
     repo_path = repo_url.replace('https://github.com/', '')
     
@@ -181,7 +217,6 @@ def extract_links_from_repo(session, repo_url, patterns):
 
 
 def check_repository(session, repo_info, patterns, keywords, subscription_links):
-    """Check a single repository and extract links"""
     repo_url = repo_info['url']
     try:
         repo_path = repo_url.replace('https://github.com/', '')
@@ -212,7 +247,6 @@ def check_repository(session, repo_info, patterns, keywords, subscription_links)
 
 
 def find_subscription_links():
-    """Main function to find subscription links"""
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("STEP 1: Finding subscription links from GitHub", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
@@ -243,7 +277,6 @@ def find_subscription_links():
             except:
                 pass
     
-    # Validate links
     print(f"[*] Validating {len(subscription_links)} extracted links...")
     valid_links = []
     
@@ -268,19 +301,17 @@ def find_subscription_links():
 # ============================================================
 
 def fetch_configs_from_link(session, url):
-    """Fetch configs from a single subscription link"""
     try:
         resp = session.get(url, timeout=15, headers=HEADERS)
         resp.raise_for_status()
         content = resp.text.strip().splitlines()
         return [line.strip() for line in content if line.strip()]
     except Exception as e:
-        print(f"  Failed: {url[:50]}... - {str(e)[:50]}")
+        print(f"  Failed: {url[:50]}...")
         return []
 
 
 def fetch_all_configs(subscription_links):
-    """Fetch configs from all subscription links and deduplicate"""
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("STEP 2: Fetching and deduplicating configs", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
@@ -304,151 +335,362 @@ def fetch_all_configs(subscription_links):
     
     print(f"\n[*] Total configs fetched: {total_fetched}")
     
-    # Deduplicate
     unique_configs = list(set(all_configs))
     duplicates_removed = total_fetched - len(unique_configs)
     print(f"[*] Unique configs: {len(unique_configs)}")
     print(f"[*] Duplicates removed: {duplicates_removed}")
     
-    return unique_configs, total_fetched, len(unique_configs), duplicates_removed
+    return unique_configs
 
 
 # ============================================================
-# بخش 3: تست کانفیگ و انتخاب سریعترین‌ها
+# بخش 3: تست کانفیگ با Xray Core (با پشتیبانی از config.json)
 # ============================================================
 
-def test_single_config(config_line, timeout=TEST_TIMEOUT_SECONDS):
-    """Test a single config and return (config, response_time_ms)"""
-    if stop_processing or not config_line.strip():
-        return config_line, None
+def download_xray_core(vendor_path: Path) -> bool:
+    """Download Xray core binary"""
+    system = platform.system().lower()
+    arch = platform.machine().lower()
+    
+    if system == "linux":
+        if arch in ["x86_64", "amd64"]:
+            download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+        elif arch in ["aarch64", "arm64"]:
+            download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
+        else:
+            color_print(f"[!] Unsupported architecture: {arch}", Fore.RED)
+            return False
+    elif system == "darwin":
+        download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-macos-64.zip"
+    else:
+        color_print(f"[!] Unsupported OS: {system}", Fore.RED)
+        return False
     
     try:
-        host, port = None, None
+        color_print("[*] Downloading Xray core...", Fore.CYAN)
+        resp = requests.get(download_url, timeout=60)
+        resp.raise_for_status()
         
-        if config_line.startswith('vless://'):
-            parsed = urlparse(config_line)
-            if '@' in parsed.netloc:
-                hp = parsed.netloc.split('@')[1]
-                if ':' in hp:
-                    host, port = hp.split(':')
-        elif config_line.startswith('vmess://'):
-            encoded = config_line.replace('vmess://', '')
-            try:
-                decoded = base64.b64decode(encoded).decode('utf-8')
-                cfg = json.loads(decoded)
-                host = cfg.get('add')
-                port = str(cfg.get('port'))
-            except:
-                pass
-        elif config_line.startswith('trojan://') or config_line.startswith('ss://'):
-            parsed = urlparse(config_line)
-            host = parsed.hostname
-            port = parsed.port
+        zip_path = vendor_path / "xray.zip"
+        with open(zip_path, 'wb') as f:
+            f.write(resp.content)
         
-        if host and port:
-            test_url = f"http://{host}:{port}/"
-            with requests.Session() as sess:
-                sess.headers.update(HEADERS)
-                sess.verify = False
-                start_time = time.time()
-                r = sess.get(test_url, timeout=timeout)
-                elapsed_ms = (time.time() - start_time) * 1000
-                if r.status_code < 500:
-                    time.sleep(random.uniform(0.05, 0.2))
-                    return config_line, elapsed_ms
-        return config_line, None
-    except Exception:
-        return config_line, None
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            zipf.extractall(vendor_path)
+        
+        zip_path.unlink()
+        
+        # Make executable
+        xray_path = vendor_path / "xray"
+        if system == "linux" or system == "darwin":
+            xray_path.chmod(0o755)
+        
+        color_print("[✓] Xray core downloaded successfully", Fore.GREEN)
+        return True
+    except Exception as e:
+        color_print(f"[!] Failed to download Xray: {e}", Fore.RED)
+        return False
 
 
-def test_configs_and_save(unique_configs):
-    """Test random sample of configs and save fastest ones"""
+def parse_v2ray_uri(uri: str) -> Optional[dict]:
+    """Parse different config URI types (vless, vmess, trojan)"""
+    try:
+        if uri.startswith('vless://'):
+            parsed = urlparse(uri)
+            return {
+                'protocol': 'vless',
+                'address': parsed.hostname,
+                'port': parsed.port,
+                'id': parsed.username or '',
+                'encryption': 'none',
+                'flow': '',
+                'original_uri': uri
+            }
+        elif uri.startswith('vmess://'):
+            encoded = uri.replace('vmess://', '')
+            encoded += '=' * (-len(encoded) % 4)
+            decoded = base64.b64decode(encoded).decode('utf-8')
+            data = json.loads(decoded)
+            return {
+                'protocol': 'vmess',
+                'address': data.get('add', ''),
+                'port': int(data.get('port', 0)),
+                'id': data.get('id', ''),
+                'aid': data.get('aid', 0),
+                'security': data.get('scy', 'auto'),
+                'original_uri': uri
+            }
+        elif uri.startswith('trojan://'):
+            parsed = urlparse(uri)
+            return {
+                'protocol': 'trojan',
+                'address': parsed.hostname,
+                'port': parsed.port,
+                'password': parsed.username or '',
+                'original_uri': uri
+            }
+        elif uri.startswith('ss://'):
+            return {
+                'protocol': 'shadowsocks',
+                'original_uri': uri
+            }
+    except Exception as e:
+        pass
+    return None
+
+
+def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
+    """Build Xray configuration with settings from config.json"""
+    core_settings = XRAY_SETTINGS["core"]
+    
+    # Base config
+    config = {
+        "log": {"loglevel": core_settings.get("log_level", "warning")},
+        "inbounds": [{
+            "port": inbound_port,
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": True},
+            "sniffing": {
+                "enabled": core_settings.get("sniffing_enabled", True),
+                "destOverride": ["http", "tls"]
+            } if core_settings.get("sniffing_enabled", True) else None
+        }],
+        "outbounds": [],
+        "routing": {
+            "domainStrategy": core_settings.get("domain_strategy", "IPIFNonMatch"),
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["socks-inbound"],
+                "outboundTag": "proxy"
+            }]
+        }
+    }
+    
+    # Remove None values
+    if config["inbounds"][0]["sniffing"] is None:
+        del config["inbounds"][0]["sniffing"]
+    
+    # Set inbound tag
+    config["inbounds"][0]["tag"] = "socks-inbound"
+    
+    # Add DNS if enabled
+    if core_settings.get("dns", {}).get("enabled", False):
+        dns_settings = core_settings["dns"]
+        config["dns"] = {
+            "servers": [
+                dns_settings.get("remote_server", "https://8.8.8.8/dns-query"),
+                dns_settings.get("domestic_server", "1.1.1.2")
+            ]
+        }
+        if dns_settings.get("fake_dns_enabled", False):
+            config["dns"]["fakeDns"] = {"enabled": True, "poolSize": 65535}
+    
+    # Build outbound based on protocol
+    if parsed['protocol'] == 'vless':
+        outbound = {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "users": [{
+                        "id": parsed['id'],
+                        "encryption": parsed.get('encryption', 'none'),
+                        "flow": parsed.get('flow', '')
+                    }]
+                }]
+            },
+            "tag": "proxy"
+        }
+    elif parsed['protocol'] == 'vmess':
+        outbound = {
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "users": [{
+                        "id": parsed['id'],
+                        "alterId": parsed.get('aid', 0),
+                        "security": parsed.get('security', 'auto')
+                    }]
+                }]
+            },
+            "tag": "proxy"
+        }
+    elif parsed['protocol'] == 'trojan':
+        outbound = {
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "password": parsed['password']
+                }]
+            },
+            "tag": "proxy"
+        }
+    else:
+        return None
+    
+    # Add fragment settings if enabled
+    if core_settings.get("fragment", {}).get("enabled", False):
+        frag = core_settings["fragment"]
+        outbound["streamSettings"] = {
+            "sockopt": {
+                "tcpFragment": {
+                    "packets": frag.get("packets", "tlshello"),
+                    "length": frag.get("length", "10-30"),
+                    "interval": frag.get("interval", "1-5")
+                }
+            }
+        }
+    
+    # Add mux if enabled
+    if core_settings.get("mux", {}).get("enabled", False):
+        outbound["mux"] = {"enabled": True, "concurrency": core_settings["mux"].get("concurrency", 8)}
+    
+    # Add security settings
+    outbound["settings"]["vnext"][0]["users"][0]["security"] = parsed.get('security', 'auto')
+    
+    config["outbounds"].append(outbound)
+    
+    return config
+
+
+def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) -> Tuple[Optional[str], Optional[float]]:
+    """Test a single config using Xray core and return (config_line, response_time_ms) if working"""
+    parsed = parse_v2ray_uri(config_line)
+    if not parsed or not parsed.get('address') or not parsed.get('port'):
+        return None, None
+    
+    # Skip shadowsocks for now
+    if parsed['protocol'] == 'shadowsocks':
+        return None, None
+    
+    config = build_xray_config(parsed, local_port)
+    if not config:
+        return None, None
+    
+    # Write config to temp file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump(config, f, indent=2)
+        config_path = f.name
+    
+    process = None
+    try:
+        # Start Xray process
+        process = subprocess.Popen(
+            [str(xray_path), "-config", config_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        # Wait for port to be ready
+        time.sleep(2)
+        
+        # Test connection through SOCKS proxy
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{local_port}",
+            "https": f"socks5h://127.0.0.1:{local_port}"
+        }
+        
+        start_time = time.time()
+        response = requests.get(TEST_URL, proxies=proxies, timeout=10)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if response.status_code < 500 and elapsed_ms <= MAX_RESPONSE_TIME_MS:
+            return config_line, elapsed_ms
+        
+    except Exception as e:
+        pass
+    finally:
+        if process:
+            process.terminate()
+            time.sleep(0.5)
+            process.kill()
+        try:
+            os.unlink(config_path)
+        except:
+            pass
+    
+    return None, None
+
+
+def test_configs_and_save(unique_configs: List[str]) -> int:
+    """Test configs using Xray core and save fastest ones"""
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("STEP 3: Testing configs and selecting fastest", Fore.YELLOW, Style.BRIGHT)
+    color_print("STEP 3: Testing configs with Xray Core (Real proxy test)", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     total_available = len(unique_configs)
     print(f"[*] Total unique configs available: {total_available}")
+    print(f"[*] Goal: Find {MAX_FASTEST_CONFIGS} configs with response time < {MAX_RESPONSE_TIME_MS}ms")
+    print(f"[*] Testing will stop once target is reached\n")
     
-    # Random sampling
-    if total_available <= RANDOM_SAMPLE_SIZE:
-        sample_configs = unique_configs
-        print(f"[*] Testing ALL {total_available} configs")
-    else:
-        sample_configs = random.sample(unique_configs, RANDOM_SAMPLE_SIZE)
-        print(f"[*] Randomly selected {RANDOM_SAMPLE_SIZE} configs out of {total_available}")
+    # Setup Xray environment
+    project_root = Path(__file__).parent.resolve()
+    vendor_path = project_root / "vendor"
+    vendor_path.mkdir(exist_ok=True)
     
-    print(f"[*] Goal: Find fastest {MAX_FASTEST_CONFIGS} configs\n")
+    xray_path = vendor_path / "xray"
+    if platform.system().lower() == "windows":
+        xray_path = vendor_path / "xray.exe"
     
-    tested_configs = []  # (response_time_ms, config_line)
-    processed = 0
-    working_count = 0
-    batch_num = 1
-    total = len(sample_configs)
+    if not xray_path.exists():
+        if not download_xray_core(vendor_path):
+            color_print("[!] Xray core setup failed. Exiting.", Fore.RED)
+            return 0
     
-    for start in range(0, total, TEST_BATCH_SIZE):
+    # Shuffle for random testing
+    random.shuffle(unique_configs)
+    
+    fastest_configs = []  # (response_time_ms, config_line)
+    tested_count = 0
+    base_port = 20800
+    
+    for config_line in unique_configs:
         if stop_processing:
             break
-        end = min(start + TEST_BATCH_SIZE, total)
-        batch_configs = sample_configs[start:end]
-        batch_working = 0
         
-        print(f"[Batch {batch_num}] Testing {start+1}-{end} ({len(batch_configs)} items)...")
+        if len(fastest_configs) >= MAX_FASTEST_CONFIGS:
+            color_print(f"\n[✓] Target reached! Found {len(fastest_configs)} fast configs. Stopping.", Fore.GREEN)
+            break
         
-        with ThreadPoolExecutor(max_workers=TEST_MAX_WORKERS) as executor:
-            futures = {executor.submit(test_single_config, cfg): cfg for cfg in batch_configs}
-            for future in as_completed(futures):
-                if stop_processing:
-                    executor.shutdown(wait=False)
-                    break
-                try:
-                    cfg, response_time = future.result(timeout=TEST_TIMEOUT_SECONDS + 0.5)
-                except:
-                    cfg = futures[future]
-                    response_time = None
-                
-                processed += 1
-                if response_time is not None:
-                    working_count += 1
-                    batch_working += 1
-                    tested_configs.append((response_time, cfg))
-                
-                if working_count > 0:
-                    print(f"\r[Progress: {processed}/{total}] Working configs found: {working_count}", end='', flush=True)
-                else:
-                    print(f"\r[Progress: {processed}/{total}] Working configs found: 0", end='', flush=True)
+        tested_count += 1
+        local_port = base_port + (tested_count % 1000)
         
-        print(f"\n[Batch {batch_num}] Working in batch: {batch_working} | Total so far: {working_count}")
-        batch_num += 1
+        result, response_time = test_config_with_xray(config_line, xray_path, local_port)
         
-        if end < total and not stop_processing:
-            time.sleep(random.uniform(0.5, 1.0))
+        if result and response_time:
+            fastest_configs.append((response_time, result))
+            fastest_configs.sort(key=lambda x: x[0])
+            
+            print(f"\r[Tested: {tested_count}] ✓ Found! Speed: {response_time:.1f}ms | Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
+        else:
+            print(f"\r[Tested: {tested_count}] Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", end='', flush=True)
+        
+        # Small delay between tests
+        time.sleep(random.uniform(0.3, 0.7))
     
     print()
     
-    if not tested_configs:
+    if not fastest_configs:
         color_print("[!] No working configs found!", Fore.RED)
-        return 0, 0, 0
-    
-    # Sort by response time (fastest first)
-    tested_configs.sort(key=lambda x: x[0])
-    
-    # Take top N
-    top_configs = tested_configs[:MAX_FASTEST_CONFIGS]
+        return 0
     
     # Save to file
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for response_time, config_line in top_configs:
+        for response_time, config_line in fastest_configs:
             f.write(config_line + '\n')
     
-    fastest = top_configs[0][0] if top_configs else 0
-    slowest_in_top = top_configs[-1][0] if top_configs else 0
+    fastest_time = fastest_configs[0][0]
+    slowest_in_top = fastest_configs[-1][0]
     
-    color_print(f"\n[✓] Tested {len(tested_configs)} working configs out of {RANDOM_SAMPLE_SIZE} random samples", Fore.GREEN)
-    color_print(f"[✓] Saved {len(top_configs)} fastest configs to {OUTPUT_FILE}", Fore.GREEN)
-    color_print(f"[*] Fastest: {fastest:.1f}ms | Slowest in top {len(top_configs)}: {slowest_in_top:.1f}ms", Fore.CYAN)
+    color_print(f"\n[✓] Saved {len(fastest_configs)} fastest configs to {OUTPUT_FILE}", Fore.GREEN)
+    color_print(f"[*] Fastest: {fastest_time:.1f}ms | Slowest in list: {slowest_in_top:.1f}ms", Fore.CYAN)
     
-    return len(top_configs), len(tested_configs), len(sample_configs)
+    return len(fastest_configs)
 
 
 # ============================================================
@@ -481,9 +723,23 @@ def main():
     global stop_processing
     stop_processing = False
     
+    # Install colorama for colored output
+    try:
+        from colorama import init, Fore, Style
+        init(autoreset=True)
+    except ImportError:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'colorama'])
+        from colorama import init, Fore, Style
+        init(autoreset=True)
+    
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("V2RAY MANAGER - Complete Automation", Fore.YELLOW, Style.BRIGHT)
+    color_print("V2RAY MANAGER - Complete Automation with Xray Core", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
+    
+    print(f"[*] Using config from: {CONFIG_FILE}")
+    print(f"[*] Test URL: {TEST_URL}")
+    print(f"[*] Fragment: {'Enabled' if XRAY_SETTINGS['core'].get('fragment', {}).get('enabled', False) else 'Disabled'}")
+    print(f"[*] DNS Fake: {'Enabled' if XRAY_SETTINGS['core'].get('dns', {}).get('fake_dns_enabled', False) else 'Disabled'}")
     
     start_time = time.time()
     
@@ -496,14 +752,14 @@ def main():
             sys.exit(1)
         
         # Step 2: Fetch and deduplicate configs
-        unique_configs, total_fetched, unique_count, duplicates_removed = fetch_all_configs(subscription_links)
+        unique_configs = fetch_all_configs(subscription_links)
         
         if not unique_configs:
             color_print("\n[!] No configs extracted. Exiting.", Fore.RED)
             sys.exit(1)
         
-        # Step 3: Test configs and save fastest
-        saved_count, working_count, tested_count = test_configs_and_save(unique_configs)
+        # Step 3: Test configs with Xray core and save fastest
+        saved_count = test_configs_and_save(unique_configs)
         
         # Summary
         elapsed = time.time() - start_time
@@ -511,12 +767,9 @@ def main():
         color_print("SUMMARY", Fore.YELLOW, Style.BRIGHT)
         color_print("="*60, Fore.CYAN)
         print(f"  Subscription links found: {len(subscription_links)}")
-        print(f"  Total configs fetched: {total_fetched}")
-        print(f"  Duplicates removed: {duplicates_removed}")
-        print(f"  Unique configs: {unique_count}")
-        print(f"  Configs tested: {tested_count}")
-        print(f"  Working configs found: {working_count}")
-        print(f"  Fastest configs saved: {saved_count}")
+        print(f"  Total unique configs: {len(unique_configs)}")
+        print(f"  Working fast configs saved: {saved_count}")
+        print(f"  Max response time allowed: {MAX_RESPONSE_TIME_MS}ms")
         print(f"  Output file: {OUTPUT_FILE}")
         print(f"  Total time: {elapsed:.1f} seconds")
         color_print("="*60, Fore.CYAN)
@@ -529,6 +782,8 @@ def main():
         color_print("\n[!] Interrupted by user", Fore.YELLOW)
     except Exception as e:
         color_print(f"\n[ERROR] {e}", Fore.RED)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
