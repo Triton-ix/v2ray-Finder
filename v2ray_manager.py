@@ -34,8 +34,7 @@ import urllib3
 # تنظیمات جستجوی لینک‌های اشتراک
 SUBSCRIPTION_SEARCH_DAYS_BACK = 5          # جستجوی لینک‌هایی که در X روز گذشته بروز شده‌اند
 SUBSCRIPTION_MAX_SEARCH_PAGES = 3          # حداکثر تعداد صفحات جستجو (کاهش برای جلوگیری از Rate Limit)
-SUBSCRIPTION_MAX_WORKERS = 2               # تعداد همزمانی کمتر برای جلوگیری از Rate Limit
-SUBSCRIPTION_DELAY_BETWEEN_REQUESTS = 2    # تاخیر بین درخواست‌ها (ثانیه)
+SUBSCRIPTION_MAX_WORKERS = 2               # تعداد همزمانی برای بررسی ریپازیتوری‌ها (کاهش)
 
 # تنظیمات تست کانفیگ
 MAX_FASTEST_CONFIGS = 2000                 # تعداد کانفیگ‌های نهایی که ذخیره می‌شوند
@@ -45,18 +44,27 @@ CONFIG_FILE = "config.json"                # فایل تنظیمات Xray
 
 # تنظیمات فایل خروجی
 OUTPUT_FILE = "Triton-ix.txt"              # نام فایل خروجی نهایی
-CACHE_FILE = "repos_cache.json"            # فایل کش برای جلوگیری از درخواست‌های تکراری
+DEBUG_LOG = "debug.log"                    # فایل لاگ برای دیباگ
 
-# کلمات کلیدی اصلی برای جستجوی ریپازیتوری‌های ایرانی
+# کلمات کلیدی اصلی برای جستجوی ریپازیتوری‌های ایرانی (باید در توضیحات باشند)
 IRAN_KEYWORDS = ['iran', 'ایران', 'ir', 'persia', 'فارسی', 'farsi']
 
-# کلمات مرتبط با V2Ray برای جستجو (کاهش یافته)
-V2RAY_KEYWORDS = ['v2ray', 'config', 'کانفیگ', 'subscription', 'اشتراک']
+# کلمات مرتبط با V2Ray برای جستجو (ترکیب با کلمات کلیدی اصلی)
+V2RAY_KEYWORDS = [
+    'v2ray', 'subscription', 'config', 'کانفیگ', 'اشتراک',
+    'vless', 'vmess', 'trojan', 'proxy', 'پروکسی', 'فیلترشکن'
+]
+
+# الگوهای تشخیص لینک اشتراک
+SUBSCRIPTION_PATTERNS = [
+    r'(https?://raw\.githubusercontent\.com/[^\s"\'<>]+\.(txt|json|yml|yaml|link))',
+    r'(https?://github\.com/[^\s"\'<>]+/raw/[^\s"\'<>]+)',
+    r'https?://[^\s"\']+\.(txt|json|link)',
+]
 
 # هدرهای درخواست
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/vnd.github.v3+json'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
 # ============================================================
@@ -68,11 +76,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # تنظیم لاگینگ
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [%(levelname)s] - %(message)s'
+    format='%(asctime)s - [%(levelname)s] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(DEBUG_LOG, mode='w')
+    ]
 )
 
 stop_processing = False
-rate_limited = False
 
 def signal_handler(sig, frame):
     global stop_processing
@@ -81,7 +92,7 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
-# Import colorama
+# Import colorama after installing if needed
 try:
     from colorama import init, Fore, Style
     init(autoreset=True)
@@ -92,37 +103,6 @@ except ImportError:
 
 def color_print(text, color=Fore.WHITE, style=Style.NORMAL):
     print(f"{style}{color}{text}{Style.RESET_ALL}")
-
-
-# ============================================================
-# کش برای ذخیره نتایج
-# ============================================================
-
-def load_cache() -> dict:
-    """Load cached repository data"""
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                cache = json.load(f)
-                # فقط کش کمتر از 24 ساعت معتبر است
-                if cache.get('timestamp', 0) > time.time() - 86400:
-                    return cache.get('repos', [])
-        except:
-            pass
-    return []
-
-
-def save_cache(repos):
-    """Save repository data to cache"""
-    try:
-        cache = {
-            'timestamp': time.time(),
-            'repos': repos
-        }
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=2)
-    except:
-        pass
 
 
 # ============================================================
@@ -158,8 +138,9 @@ def load_xray_config() -> dict:
                 if "core" in user_config:
                     default_config["core"].update(user_config["core"])
                 logging.info(f"Loaded config from {CONFIG_FILE}")
+                return default_config
         except Exception as e:
-            logging.error(f"Error loading config.json: {e}")
+            logging.error(f"Error loading config.json: {e}, using defaults")
     
     return default_config
 
@@ -180,38 +161,47 @@ def is_within_days(date_obj, days):
 
 
 def build_search_queries() -> List[str]:
-    """Build search queries - reduced to avoid rate limit"""
-    # فقط مهم‌ترین جستجوها
-    queries = [
-        "v2ray iran",
-        "v2ray ایران",
+    """ساخت جستجوهای ترکیبی با کلمات کلیدی اصلی + کلمات مرتبط با V2Ray"""
+    queries = []
+    
+    # فقط مهم‌ترین جستجوها برای جلوگیری از Rate Limit
+    important_queries = [
+        "v2ray subscription iran",
         "v2ray config iran",
         "کانفیگ v2ray ایران",
-        "v2ray subscription",
-        "اشتراک v2ray",
-        "vless config",
-        "vmess config",
+        "اشتراک v2ray ایران",
+        "v2ray iran",
+        "v2ray ایران",
+        "vless iran",
+        "vmess iran",
     ]
-    return queries[:8]  # حداکثر 8 جستجو
+    
+    queries.extend(important_queries)
+    
+    # حذف تکراری‌ها و محدود کردن تعداد
+    unique_queries = list(set(queries))[:10]  # حداکثر 10 جستجو (کاهش برای جلوگیری از Rate Limit)
+    
+    logging.info(f"Built {len(unique_queries)} search queries")
+    return unique_queries
 
 
 def search_github_repos(session, seen_repos):
-    """Search GitHub for Iran-related repositories"""
-    global rate_limited
-    
+    """Search GitHub for Iran-related repositories using combined keywords"""
     repos = []
     search_queries = build_search_queries()
     
     for q in search_queries:
-        if stop_processing or rate_limited:
+        if stop_processing:
             break
-            
+        
+        # تاخیر بیشتر بین جستجوها برای جلوگیری از Rate Limit
+        time.sleep(2)
+        
         for page in range(1, SUBSCRIPTION_MAX_SEARCH_PAGES + 1):
-            if stop_processing or rate_limited:
+            if stop_processing:
                 break
-                
             try:
-                url = f'https://api.github.com/search/repositories?q={q}&page={page}&per_page=10&sort=updated&order=desc'
+                url = f'https://api.github.com/search/repositories?q={q}&page={page}&per_page=20&sort=updated&order=desc'
                 resp = session.get(url, timeout=15)
                 
                 if resp.status_code == 200:
@@ -239,22 +229,13 @@ def search_github_repos(session, seen_repos):
                                     'updated_at': updated_at,
                                     'description': repo.get('description', ''),
                                 })
-                                logging.info(f"Found repo: {name}")
-                                
                 elif resp.status_code == 403:
-                    reset_time = resp.headers.get('X-RateLimit-Reset', '')
-                    if reset_time:
-                        reset_dt = datetime.fromtimestamp(int(reset_time))
-                        wait_seconds = (reset_dt - datetime.now()).total_seconds()
-                        if wait_seconds > 0 and wait_seconds < 300:
-                            logging.warning(f"Rate limit hit! Waiting {wait_seconds:.0f} seconds...")
-                            time.sleep(min(wait_seconds, 60))
-                    else:
-                        logging.warning(f"Rate limit hit for query '{q}', stopping...")
-                        rate_limited = True
-                        break
+                    logging.warning(f"Rate limit hit for query '{q}', waiting 60 seconds...")
+                    time.sleep(60)  # منتظر ماندن طولانی‌تر
+                    break
                 
-                time.sleep(SUBSCRIPTION_DELAY_BETWEEN_REQUESTS)
+                # تاخیر بیشتر بین صفحات
+                time.sleep(1)
                 
             except Exception as e:
                 logging.error(f"Search error for '{q}': {e}")
@@ -301,7 +282,6 @@ def extract_links_from_repo(session, repo_url, patterns):
                                     all_links[m] = (raw_url, config_count)
             except:
                 continue
-            time.sleep(0.5)
     
     if all_links:
         best_link = max(all_links.items(), key=lambda x: x[1][1])
@@ -310,22 +290,34 @@ def extract_links_from_repo(session, repo_url, patterns):
 
 
 def check_repository(session, repo_info, patterns, subscription_links):
-    """Check a single repository"""
+    """Check a single repository and extract the best subscription link"""
     repo_url = repo_info['url']
     repo_name = repo_info['name']
     description = repo_info.get('description', '') or ''
     
     try:
-        # Check description for Iran keywords
+        # بررسی توضیحات ریپازیتوری
         if not has_iran_keywords_in_text(description):
-            return False
+            # اگر توضیحات نداشت، README را چک کن
+            try:
+                for branch in ['main', 'master']:
+                    readme_url = f'https://raw.githubusercontent.com/{repo_name}/{branch}/README.md'
+                    readme_resp = session.get(readme_url, timeout=10)
+                    if readme_resp.status_code == 200:
+                        readme_content = readme_resp.text[:1000]
+                        if has_iran_keywords_in_text(readme_content):
+                            break
+                    else:
+                        return False
+            except:
+                return False
         
-        # Extract links
+        # استخراج لینک
         links = extract_links_from_repo(session, repo_url, patterns)
         
         if links:
             subscription_links.update(links)
-            logging.info(f"Added link from {repo_name}")
+            logging.info(f"Found link from {repo_name}")
             return True
             
     except Exception as e:
@@ -336,27 +328,19 @@ def check_repository(session, repo_info, patterns, subscription_links):
 
 def find_subscription_links():
     """Main function to find subscription links"""
-    global rate_limited
-    rate_limited = False
-    
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("STEP 1: Finding subscription links", Fore.YELLOW, Style.BRIGHT)
+    color_print("STEP 1: Finding subscription links from GitHub", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    # Try to load from cache first
-    cached_repos = load_cache()
-    if cached_repos:
-        print(f"[*] Loaded {len(cached_repos)} repositories from cache")
-        repos = cached_repos
-    else:
-        print(f"[*] Searching GitHub (last {SUBSCRIPTION_SEARCH_DAYS_BACK} days)...")
-        seen_repos = set()
-        repos = search_github_repos(session, seen_repos)
-        if repos:
-            save_cache(repos)
+    print(f"[*] Searching for Iran-related repos (last {SUBSCRIPTION_SEARCH_DAYS_BACK} days)...")
+    print(f"[*] Using {SUBSCRIPTION_MAX_SEARCH_PAGES} pages per query with {len(build_search_queries())} queries")
+    print(f"[*] Waiting between requests to avoid rate limiting...\n")
+    
+    seen_repos = set()
+    repos = search_github_repos(session, seen_repos)
     
     if not repos:
         print("[!] No repositories found")
@@ -375,7 +359,7 @@ def find_subscription_links():
             except Exception as e:
                 logging.error(f"Future error: {e}")
     
-    # Validate links
+    # اعتبارسنجی لینک‌ها
     valid_links = []
     for link in list(subscription_links):
         try:
@@ -408,7 +392,7 @@ def fetch_configs_from_link(session, url):
 
 def fetch_all_configs(subscription_links):
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("STEP 2: Fetching configs", Fore.YELLOW, Style.BRIGHT)
+    color_print("STEP 2: Fetching and deduplicating configs", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     session = requests.Session()
@@ -426,7 +410,7 @@ def fetch_all_configs(subscription_links):
             print(f"    Found {len(configs)} configs")
             total_fetched += len(configs)
             all_configs.extend(configs)
-        time.sleep(1)
+        time.sleep(0.5)
     
     print(f"\n[*] Total configs fetched: {total_fetched}")
     
@@ -439,39 +423,251 @@ def fetch_all_configs(subscription_links):
 
 
 # ============================================================
-# بخش 3: تست کانفیگ (ساده شده)
+# بخش 3: تست کانفیگ با Xray Core
 # ============================================================
 
+def download_xray_core(vendor_path: Path) -> bool:
+    """Download Xray core binary"""
+    try:
+        color_print("[*] Downloading Xray core...", Fore.CYAN)
+        
+        download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+        resp = requests.get(download_url, timeout=120)
+        resp.raise_for_status()
+        
+        zip_path = vendor_path / "xray.zip"
+        with open(zip_path, 'wb') as f:
+            f.write(resp.content)
+        
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            zipf.extractall(vendor_path)
+        
+        zip_path.unlink()
+        
+        xray_path = vendor_path / "xray"
+        xray_path.chmod(0o755)
+        
+        result = subprocess.run([str(xray_path), "-version"], capture_output=True)
+        if result.returncode == 0:
+            color_print("[✓] Xray core ready", Fore.GREEN)
+            return True
+            
+    except Exception as e:
+        logging.error(f"Xray download failed: {e}")
+    
+    return False
+
+
+def parse_v2ray_uri(uri: str) -> Optional[dict]:
+    """Parse config URI"""
+    try:
+        if uri.startswith('vless://'):
+            parsed = urlparse(uri)
+            return {
+                'protocol': 'vless',
+                'address': parsed.hostname,
+                'port': parsed.port,
+                'id': parsed.username or '',
+                'encryption': 'none',
+            }
+        elif uri.startswith('vmess://'):
+            encoded = uri.replace('vmess://', '')
+            encoded += '=' * (-len(encoded) % 4)
+            decoded = base64.b64decode(encoded).decode('utf-8')
+            data = json.loads(decoded)
+            return {
+                'protocol': 'vmess',
+                'address': data.get('add', ''),
+                'port': int(data.get('port', 0)),
+                'id': data.get('id', ''),
+                'aid': data.get('aid', 0),
+                'security': data.get('scy', 'auto'),
+            }
+        elif uri.startswith('trojan://'):
+            parsed = urlparse(uri)
+            return {
+                'protocol': 'trojan',
+                'address': parsed.hostname,
+                'port': parsed.port,
+                'password': parsed.username or '',
+            }
+    except Exception:
+        pass
+    return None
+
+
+def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
+    """Build Xray config"""
+    core_settings = XRAY_SETTINGS["core"]
+    
+    config = {
+        "log": {"loglevel": core_settings.get("log_level", "warning")},
+        "inbounds": [{
+            "port": inbound_port,
+            "protocol": "socks",
+            "tag": "socks-inbound",
+            "settings": {"auth": "noauth", "udp": True},
+        }],
+        "outbounds": [],
+        "routing": {
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["socks-inbound"],
+                "outboundTag": "proxy"
+            }]
+        }
+    }
+    
+    if parsed['protocol'] == 'vless':
+        outbound = {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "users": [{"id": parsed['id'], "encryption": "none"}]
+                }]
+            },
+            "tag": "proxy"
+        }
+    elif parsed['protocol'] == 'vmess':
+        outbound = {
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "users": [{"id": parsed['id'], "alterId": parsed.get('aid', 0)}]
+                }]
+            },
+            "tag": "proxy"
+        }
+    elif parsed['protocol'] == 'trojan':
+        outbound = {
+            "protocol": "trojan",
+            "settings": {
+                "servers": [{
+                    "address": parsed['address'],
+                    "port": parsed['port'],
+                    "password": parsed['password']
+                }]
+            },
+            "tag": "proxy"
+        }
+    else:
+        return None
+    
+    config["outbounds"].append(outbound)
+    return config
+
+
+def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) -> Tuple[Optional[str], Optional[float]]:
+    """Test config with Xray"""
+    parsed = parse_v2ray_uri(config_line)
+    if not parsed or not parsed.get('address'):
+        return None, None
+    
+    config = build_xray_config(parsed, local_port)
+    if not config:
+        return None, None
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump(config, f)
+        config_path = f.name
+    
+    process = None
+    try:
+        process = subprocess.Popen(
+            [str(xray_path), "-config", config_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        time.sleep(2)
+        
+        proxies = {
+            "http": f"socks5h://127.0.0.1:{local_port}",
+            "https": f"socks5h://127.0.0.1:{local_port}"
+        }
+        
+        start_time = time.time()
+        response = requests.get(TEST_URL, proxies=proxies, timeout=10)
+        elapsed_ms = (time.time() - start_time) * 1000
+        
+        if response.status_code < 500 and elapsed_ms <= MAX_RESPONSE_TIME_MS:
+            return config_line, elapsed_ms
+        
+    except Exception:
+        pass
+    finally:
+        if process:
+            process.terminate()
+            time.sleep(0.5)
+            process.kill()
+        try:
+            os.unlink(config_path)
+        except:
+            pass
+    
+    return None, None
+
+
 def test_configs_and_save(unique_configs: List[str]) -> int:
-    """Test configs and save fastest ones - simplified"""
+    """Test and save fastest configs"""
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("STEP 3: Testing configs", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     print(f"[*] Total unique configs: {len(unique_configs)}")
-    print(f"[*] Goal: {MAX_FASTEST_CONFIGS} fast configs\n")
+    print(f"[*] Goal: {MAX_FASTEST_CONFIGS} configs under {MAX_RESPONSE_TIME_MS}ms\n")
     
-    # تست ساده بدون Xray برای جلوگیری از خطا
-    # فقط کانفیگ‌های معتبر را انتخاب می‌کنیم
-    valid_configs = []
-    for cfg in unique_configs[:5000]:  # حداکثر 5000
-        if cfg.startswith(('vless://', 'vmess://', 'trojan://')):
-            valid_configs.append(cfg)
+    project_root = Path(__file__).parent.resolve()
+    vendor_path = project_root / "vendor"
+    vendor_path.mkdir(exist_ok=True)
     
-    if not valid_configs:
-        color_print("[!] No valid configs found!", Fore.RED)
+    xray_path = vendor_path / "xray"
+    
+    if not xray_path.exists():
+        if not download_xray_core(vendor_path):
+            color_print("[!] Xray setup failed", Fore.RED)
+            return 0
+    
+    random.shuffle(unique_configs)
+    
+    fastest_configs = []
+    tested_count = 0
+    base_port = 20800
+    
+    for config_line in unique_configs[:5000]:
+        if stop_processing or len(fastest_configs) >= MAX_FASTEST_CONFIGS:
+            break
+        
+        tested_count += 1
+        local_port = base_port + (tested_count % 1000)
+        
+        result, response_time = test_config_with_xray(config_line, xray_path, local_port)
+        
+        if result and response_time:
+            fastest_configs.append((response_time, result))
+            fastest_configs.sort(key=lambda x: x[0])
+            print(f"\r✓ Found! {response_time:.0f}ms | Total: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
+        else:
+            print(f"\rTested: {tested_count} | Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", end='', flush=True)
+        
+        time.sleep(0.5)
+    
+    print()
+    
+    if not fastest_configs:
+        color_print("[!] No working configs found!", Fore.RED)
         return 0
     
-    # انتخاب تصادفی از بین کانفیگ‌های معتبر
-    random.shuffle(valid_configs)
-    selected_configs = valid_configs[:MAX_FASTEST_CONFIGS]
-    
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for cfg in selected_configs:
-            f.write(cfg + '\n')
+        for _, config_line in fastest_configs:
+            f.write(config_line + '\n')
     
-    color_print(f"\n[✓] Saved {len(selected_configs)} configs to {OUTPUT_FILE}", Fore.GREEN)
-    return len(selected_configs)
+    color_print(f"\n[✓] Saved {len(fastest_configs)} configs to {OUTPUT_FILE}", Fore.GREEN)
+    return len(fastest_configs)
 
 
 # ============================================================
@@ -495,7 +691,7 @@ def main():
     stop_processing = False
     
     color_print("\n" + "="*60, Fore.CYAN)
-    color_print("V2RAY MANAGER - Stable Version", Fore.YELLOW, Style.BRIGHT)
+    color_print("V2RAY MANAGER - GitHub Actions", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
     
     start_time = time.time()
@@ -526,13 +722,15 @@ def main():
         if saved_count > 0:
             git_commit_and_push()
         
-        # Cleanup cache file
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
+        # حذف فایل لاگ در صورت موفقیت
+        if os.path.exists(DEBUG_LOG):
+            os.remove(DEBUG_LOG)
         
     except Exception as e:
         logging.error(f"Fatal error: {e}")
+        logging.error(traceback.format_exc())
         color_print(f"\n[ERROR] {e}", Fore.RED)
+        color_print(f"Check {DEBUG_LOG} for details", Fore.YELLOW)
         sys.exit(1)
 
 
