@@ -94,7 +94,7 @@ def generate_readme():
 
 <div style="text-align: center; direction: ltr; background-color: #f5f5f5; padding: 10px; border-radius: 5px; display: inline-block; width: 100%;">
     <code style="font-size: 14px; word-break: break-all;">{repo_url}</code>
-    <button onclick="navigator.clipboard.writeText('{repo_url}')" style="margin-right: 10px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer;">📋 کپی</button>
+    <button onclick="navigator.clipboard.writeText('{repo_url}')" style="margin-right: 10px; padding: 5px 10px; background-color: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer;">
 </div>
 
 ## گزارش خودکار وضعیت کانفیگ‌ها
