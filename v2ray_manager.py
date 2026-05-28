@@ -33,13 +33,13 @@ import urllib3
 
 # تنظیمات جستجوی لینک‌های اشتراک
 SUBSCRIPTION_SEARCH_DAYS_BACK = 5          # جستجوی لینک‌هایی که در X روز گذشته بروز شده‌اند
-SUBSCRIPTION_MAX_SEARCH_PAGES = 3          # حداکثر تعداد صفحات جستجو (کاهش برای جلوگیری از Rate Limit)
-SUBSCRIPTION_MAX_WORKERS = 2               # تعداد همزمانی برای بررسی ریپازیتوری‌ها (کاهش)
+SUBSCRIPTION_MAX_SEARCH_PAGES = 2          # حداکثر تعداد صفحات جستجو (کاهش برای جلوگیری از Rate Limit)
+SUBSCRIPTION_MAX_WORKERS = 1               # تعداد همزمانی برای بررسی ریپازیتوری‌ها (فقط 1 برای جلوگیری از Rate Limit)
 
 # تنظیمات تست کانفیگ
 MAX_FASTEST_CONFIGS = 2000                 # تعداد کانفیگ‌های نهایی که ذخیره می‌شوند
 MAX_RESPONSE_TIME_MS = 200                 # حداکثر زمان پاسخ قابل قبول (میلی‌ثانیه)
-MAX_WORKERS = 3                            # تعداد همزمانی برای تست کانفیگ‌ها
+MAX_WORKERS = 2                            # تعداد همزمانی برای تست کانفیگ‌ها (کاهش)
 CONFIG_FILE = "config.json"                # فایل تنظیمات Xray
 
 # تنظیمات فایل خروجی
@@ -49,17 +49,10 @@ DEBUG_LOG = "debug.log"                    # فایل لاگ برای دیباگ
 # کلمات کلیدی اصلی برای جستجوی ریپازیتوری‌های ایرانی (باید در توضیحات باشند)
 IRAN_KEYWORDS = ['iran', 'ایران', 'ir', 'persia', 'فارسی', 'farsi']
 
-# کلمات مرتبط با V2Ray برای جستجو (ترکیب با کلمات کلیدی اصلی)
-V2RAY_KEYWORDS = [
-    'v2ray', 'subscription', 'config', 'کانفیگ', 'اشتراک',
-    'vless', 'vmess', 'trojan', 'proxy', 'پروکسی', 'فیلترشکن'
-]
-
-# الگوهای تشخیص لینک اشتراک
+# الگوهای تشخیص لینک اشتراک (کاهش یافته)
 SUBSCRIPTION_PATTERNS = [
     r'(https?://raw\.githubusercontent\.com/[^\s"\'<>]+\.(txt|json|yml|yaml|link))',
     r'(https?://github\.com/[^\s"\'<>]+/raw/[^\s"\'<>]+)',
-    r'https?://[^\s"\']+\.(txt|json|link)',
 ]
 
 # هدرهای درخواست
@@ -150,7 +143,7 @@ TEST_URL = XRAY_SETTINGS["core"].get("test_url", "http://connectivitycheck.gstat
 
 
 # ============================================================
-# بخش 1: یافتن لینک‌های اشتراک
+# بخش 1: یافتن لینک‌های اشتراک (بدون Rate Limit)
 # ============================================================
 
 def is_within_days(date_obj, days):
@@ -161,48 +154,39 @@ def is_within_days(date_obj, days):
 
 
 def build_search_queries() -> List[str]:
-    """ساخت جستجوهای ترکیبی با کلمات کلیدی اصلی + کلمات مرتبط با V2Ray"""
-    queries = []
-    
-    # فقط مهم‌ترین جستجوها برای جلوگیری از Rate Limit
-    important_queries = [
-        "v2ray subscription iran",
-        "v2ray config iran",
-        "کانفیگ v2ray ایران",
-        "اشتراک v2ray ایران",
+    """ساخت جستجوهای بسیار محدود برای جلوگیری از Rate Limit"""
+    # فقط مهم‌ترین جستجوها (کاهش شدید)
+    queries = [
         "v2ray iran",
         "v2ray ایران",
-        "vless iran",
-        "vmess iran",
+        "v2ray config iran",
+        "کانفیگ v2ray ایران",
     ]
-    
-    queries.extend(important_queries)
-    
-    # حذف تکراری‌ها و محدود کردن تعداد
-    unique_queries = list(set(queries))[:10]  # حداکثر 10 جستجو (کاهش برای جلوگیری از Rate Limit)
-    
-    logging.info(f"Built {len(unique_queries)} search queries")
-    return unique_queries
+    return queries
 
 
 def search_github_repos(session, seen_repos):
-    """Search GitHub for Iran-related repositories using combined keywords"""
+    """Search GitHub with delays to avoid rate limiting"""
     repos = []
     search_queries = build_search_queries()
+    
+    logging.info(f"Starting search with {len(search_queries)} queries (delayed to avoid rate limit)")
     
     for q in search_queries:
         if stop_processing:
             break
         
-        # تاخیر بیشتر بین جستجوها برای جلوگیری از Rate Limit
-        time.sleep(2)
+        # تاخیر 5 ثانیه قبل از هر جستجو برای جلوگیری از Rate Limit
+        logging.info(f"Waiting 5 seconds before query: '{q}'")
+        time.sleep(5)
         
         for page in range(1, SUBSCRIPTION_MAX_SEARCH_PAGES + 1):
             if stop_processing:
                 break
             try:
                 url = f'https://api.github.com/search/repositories?q={q}&page={page}&per_page=20&sort=updated&order=desc'
-                resp = session.get(url, timeout=15)
+                logging.info(f"Requesting: {url[:80]}...")
+                resp = session.get(url, timeout=30)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -230,13 +214,14 @@ def search_github_repos(session, seen_repos):
                                     'description': repo.get('description', ''),
                                 })
                 elif resp.status_code == 403:
-                    logging.warning(f"Rate limit hit for query '{q}', waiting 60 seconds...")
-                    time.sleep(60)  # منتظر ماندن طولانی‌تر
+                    logging.warning(f"Rate limit hit for '{q}', waiting 90 seconds...")
+                    time.sleep(90)  # انتظار طولانی
                     break
                 
-                # تاخیر بیشتر بین صفحات
-                time.sleep(1)
-                
+                # تاخیر بین صفحات
+                if page < SUBSCRIPTION_MAX_SEARCH_PAGES:
+                    time.sleep(2)
+                    
             except Exception as e:
                 logging.error(f"Search error for '{q}': {e}")
                 continue
@@ -267,7 +252,7 @@ def extract_links_from_repo(session, repo_url, patterns):
         for path in paths_to_check:
             raw_url = f'https://raw.githubusercontent.com/{repo_path}/{branch}/{path}'
             try:
-                resp = session.get(raw_url, timeout=10)
+                resp = session.get(raw_url, timeout=15)
                 if resp.status_code == 200:
                     content = resp.text
                     config_count = len([line for line in content.splitlines() if line.strip()])
@@ -337,7 +322,7 @@ def find_subscription_links():
     
     print(f"[*] Searching for Iran-related repos (last {SUBSCRIPTION_SEARCH_DAYS_BACK} days)...")
     print(f"[*] Using {SUBSCRIPTION_MAX_SEARCH_PAGES} pages per query with {len(build_search_queries())} queries")
-    print(f"[*] Waiting between requests to avoid rate limiting...\n")
+    print(f"[*] Waiting 5 seconds between each request to avoid rate limiting...\n")
     
     seen_repos = set()
     repos = search_github_repos(session, seen_repos)
@@ -355,7 +340,7 @@ def find_subscription_links():
             if stop_processing:
                 break
             try:
-                future.result(timeout=30)
+                future.result(timeout=45)
             except Exception as e:
                 logging.error(f"Future error: {e}")
     
@@ -363,7 +348,7 @@ def find_subscription_links():
     valid_links = []
     for link in list(subscription_links):
         try:
-            resp = session.head(link, timeout=8)
+            resp = session.head(link, timeout=10)
             if resp.status_code < 400:
                 valid_links.append(link)
         except:
@@ -379,15 +364,21 @@ def find_subscription_links():
 # بخش 2: استخراج کانفیگ از لینک‌ها
 # ============================================================
 
-def fetch_configs_from_link(session, url):
-    try:
-        resp = session.get(url, timeout=15, headers=HEADERS)
-        resp.raise_for_status()
-        content = resp.text.strip().splitlines()
-        return [line.strip() for line in content if line.strip()]
-    except Exception as e:
-        logging.error(f"Failed to fetch {url[:50]}: {e}")
-        return []
+def fetch_configs_from_link(session, url, retries=2):
+    """Fetch configs from a link with retry mechanism"""
+    for attempt in range(retries):
+        try:
+            resp = session.get(url, timeout=20, headers=HEADERS)
+            resp.raise_for_status()
+            content = resp.text.strip().splitlines()
+            return [line.strip() for line in content if line.strip()]
+        except Exception as e:
+            if attempt < retries - 1:
+                logging.warning(f"Retry {attempt+1} for {url[:50]}")
+                time.sleep(2)
+            else:
+                logging.error(f"Failed to fetch {url[:50]}: {e}")
+    return []
 
 
 def fetch_all_configs(subscription_links):
@@ -410,7 +401,7 @@ def fetch_all_configs(subscription_links):
             print(f"    Found {len(configs)} configs")
             total_fetched += len(configs)
             all_configs.extend(configs)
-        time.sleep(0.5)
+        time.sleep(1)  # تاخیر بین درخواست‌ها
     
     print(f"\n[*] Total configs fetched: {total_fetched}")
     
@@ -423,37 +414,40 @@ def fetch_all_configs(subscription_links):
 
 
 # ============================================================
-# بخش 3: تست کانفیگ با Xray Core
+# بخش 3: تست کانفیگ با Xray Core (با مدیریت خطا)
 # ============================================================
 
 def download_xray_core(vendor_path: Path) -> bool:
-    """Download Xray core binary"""
-    try:
-        color_print("[*] Downloading Xray core...", Fore.CYAN)
-        
-        download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-        resp = requests.get(download_url, timeout=120)
-        resp.raise_for_status()
-        
-        zip_path = vendor_path / "xray.zip"
-        with open(zip_path, 'wb') as f:
-            f.write(resp.content)
-        
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
-            zipf.extractall(vendor_path)
-        
-        zip_path.unlink()
-        
-        xray_path = vendor_path / "xray"
-        xray_path.chmod(0o755)
-        
-        result = subprocess.run([str(xray_path), "-version"], capture_output=True)
-        if result.returncode == 0:
-            color_print("[✓] Xray core ready", Fore.GREEN)
-            return True
+    """Download Xray core binary with retry"""
+    for attempt in range(3):
+        try:
+            color_print(f"[*] Downloading Xray core (attempt {attempt+1})...", Fore.CYAN)
             
-    except Exception as e:
-        logging.error(f"Xray download failed: {e}")
+            download_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+            resp = requests.get(download_url, timeout=120)
+            resp.raise_for_status()
+            
+            zip_path = vendor_path / "xray.zip"
+            with open(zip_path, 'wb') as f:
+                f.write(resp.content)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zipf:
+                zipf.extractall(vendor_path)
+            
+            zip_path.unlink()
+            
+            xray_path = vendor_path / "xray"
+            xray_path.chmod(0o755)
+            
+            # تست باینری
+            result = subprocess.run([str(xray_path), "-version"], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                color_print("[✓] Xray core ready", Fore.GREEN)
+                return True
+                
+        except Exception as e:
+            logging.error(f"Xray download attempt {attempt+1} failed: {e}")
+            time.sleep(5)
     
     return False
 
@@ -562,7 +556,7 @@ def build_xray_config(parsed: dict, inbound_port: int) -> Optional[dict]:
 
 
 def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) -> Tuple[Optional[str], Optional[float]]:
-    """Test config with Xray"""
+    """Test config with Xray with error handling"""
     parsed = parse_v2ray_uri(config_line)
     if not parsed or not parsed.get('address'):
         return None, None
@@ -583,7 +577,14 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
             stderr=subprocess.DEVNULL
         )
         
-        time.sleep(2)
+        # منتظر آماده شدن پورت
+        for _ in range(10):  # حداکثر 10 ثانیه
+            time.sleep(1)
+            try:
+                with socket.create_connection(("127.0.0.1", local_port), timeout=1):
+                    break
+            except:
+                continue
         
         proxies = {
             "http": f"socks5h://127.0.0.1:{local_port}",
@@ -591,18 +592,19 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
         }
         
         start_time = time.time()
-        response = requests.get(TEST_URL, proxies=proxies, timeout=10)
+        response = requests.get(TEST_URL, proxies=proxies, timeout=15)
         elapsed_ms = (time.time() - start_time) * 1000
         
         if response.status_code < 500 and elapsed_ms <= MAX_RESPONSE_TIME_MS:
             return config_line, elapsed_ms
         
-    except Exception:
+    except Exception as e:
+        # خطاهای شبکه را نادیده بگیر (کانفیگ کار نمی‌کند)
         pass
     finally:
         if process:
             process.terminate()
-            time.sleep(0.5)
+            time.sleep(1)
             process.kill()
         try:
             os.unlink(config_path)
@@ -613,7 +615,7 @@ def test_config_with_xray(config_line: str, xray_path: Path, local_port: int) ->
 
 
 def test_configs_and_save(unique_configs: List[str]) -> int:
-    """Test and save fastest configs"""
+    """Test and save fastest configs with error handling"""
     color_print("\n" + "="*60, Fore.CYAN)
     color_print("STEP 3: Testing configs", Fore.YELLOW, Style.BRIGHT)
     color_print("="*60, Fore.CYAN)
@@ -638,21 +640,24 @@ def test_configs_and_save(unique_configs: List[str]) -> int:
     tested_count = 0
     base_port = 20800
     
-    for config_line in unique_configs[:5000]:
+    for config_line in unique_configs[:3000]:  # محدودیت برای جلوگیری از timeout
         if stop_processing or len(fastest_configs) >= MAX_FASTEST_CONFIGS:
             break
         
         tested_count += 1
         local_port = base_port + (tested_count % 1000)
         
-        result, response_time = test_config_with_xray(config_line, xray_path, local_port)
-        
-        if result and response_time:
-            fastest_configs.append((response_time, result))
-            fastest_configs.sort(key=lambda x: x[0])
-            print(f"\r✓ Found! {response_time:.0f}ms | Total: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
-        else:
-            print(f"\rTested: {tested_count} | Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", end='', flush=True)
+        try:
+            result, response_time = test_config_with_xray(config_line, xray_path, local_port)
+            
+            if result and response_time:
+                fastest_configs.append((response_time, result))
+                fastest_configs.sort(key=lambda x: x[0])
+                print(f"\r✓ Found! {response_time:.0f}ms | Total: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", flush=True)
+            else:
+                print(f"\rTested: {tested_count} | Working: {len(fastest_configs)}/{MAX_FASTEST_CONFIGS}", end='', flush=True)
+        except Exception as e:
+            logging.error(f"Test error: {e}")
         
         time.sleep(0.5)
     
