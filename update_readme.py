@@ -69,7 +69,7 @@ def generate_readme():
     jalali_str = to_jalali(now_utc)
 
     # لینک با نام کاربری جدید (Triton-ix)
-    repo_url = "https://raw.githubusercontent.com/Triton-ix/sub-link-checker/refs/heads/main/Triton-ix.txt"
+    repo_url = "https://raw.githubusercontent.com/Triton-ix/v2ray-Finder/refs/heads/main/2000-config.txt"
     
     # تولید بارکد (با استفاده از API ساده)
     barcode_url = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={repo_url}"
