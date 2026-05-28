@@ -44,8 +44,14 @@ CONFIG_FILE = "config.json"                # فایل تنظیمات Xray
 # تنظیمات فایل خروجی
 OUTPUT_FILE = "Triton-ix.txt"              # نام فایل خروجی نهایی
 
-# کلمات کلیدی برای جستجوی ریپازیتوری‌های ایرانی
+# کلمات کلیدی اصلی برای جستجوی ریپازیتوری‌های ایرانی (باید در توضیحات باشند)
 IRAN_KEYWORDS = ['iran', 'ایران', 'ir', 'persia', 'فارسی', 'farsi']
+
+# کلمات مرتبط با V2Ray برای جستجو (ترکیب با کلمات کلیدی اصلی)
+V2RAY_KEYWORDS = [
+    'v2ray', 'subscription', 'config', 'کانفیگ', 'اشتراک',
+    'vless', 'vmess', 'trojan', 'proxy', 'پروکسی', 'فیلترشکن'
+]
 
 # الگوهای تشخیص لینک اشتراک
 SUBSCRIPTION_PATTERNS = [
@@ -142,25 +148,59 @@ def is_within_days(date_obj, days):
     return (now - date_obj) <= timedelta(days=days)
 
 
-def search_github_repos(session, seen_repos):
-    """Search GitHub for Iran-related repositories"""
-    repos = []
+def build_search_queries() -> List[str]:
+    """
+    ساخت جستجوهای ترکیبی با کلمات کلیدی اصلی + کلمات مرتبط با V2Ray
+    هم به فارسی و هم به انگلیسی
+    """
+    queries = []
     
-    # جستجوهای متنوع برای پیدا کردن لینک‌های مختلف
-    search_queries = [
-        'v2ray subscription iran',
-        'v2ray config iran',
-        'کانفیگ v2ray ایران',
-        'v2ray free config',
-        'iran v2ray',
-        'vless subscription',
-        'vmess subscription',
-        'v2ray reality',
-        'free v2ray config',
-        'v2ray daily',
+    # ترکیب کلمات کلیدی اصلی با کلمات مرتبط V2Ray
+    for iran_word in IRAN_KEYWORDS:
+        for v2ray_word in V2RAY_KEYWORDS:
+            # انگلیسی
+            queries.append(f"{iran_word} {v2ray_word}")
+            # فارسی
+            if iran_word in ['ایران', 'فارسی']:
+                queries.append(f"{iran_word} {v2ray_word}")
+    
+    # جستجوهای خاص و پرکاربرد
+    specific_queries = [
+        "v2ray subscription iran",
+        "v2ray config iran",
+        "کانفیگ v2ray ایران",
+        "اشتراک v2ray ایران",
+        "v2ray iran free",
+        "v2ray iran config",
+        "v2ray ایران",
+        "کانفیگ رایگان v2ray ایران",
+        "v2ray free subscription iran",
+        "v2ray config free iran",
+        "vless iran",
+        "vmess iran",
+        "trojan iran",
+        "v2ray reality iran",
+        "v2ray daily iran",
+        "v2ray proxy iran",
     ]
     
+    queries.extend(specific_queries)
+    
+    # حذف تکراری‌ها
+    return list(set(queries))
+
+
+def search_github_repos(session, seen_repos):
+    """Search GitHub for Iran-related repositories using combined keywords"""
+    repos = []
+    search_queries = build_search_queries()
+    
+    print(f"[*] Using {len(search_queries)} search queries...")
+    
     for q in search_queries:
+        if stop_processing:
+            break
+            
         for page in range(1, SUBSCRIPTION_MAX_SEARCH_PAGES + 1):
             if stop_processing:
                 break
@@ -186,18 +226,19 @@ def search_github_repos(session, seen_repos):
                                 except:
                                     pass
                             
-                            # فقط ریپازیتوری‌هایی که در 5 روز گذشته بروز شده‌اند
+                            # فقط ریپازیتوری‌هایی که در X روز گذشته بروز شده‌اند
                             if last_update and is_within_days(last_update, SUBSCRIPTION_SEARCH_DAYS_BACK):
                                 repos.append({
                                     'name': name,
                                     'url': repo['html_url'],
                                     'updated_at': updated_at,
+                                    'description': repo.get('description', ''),
                                 })
                 elif resp.status_code == 403:
-                    print(f"Rate limit hit for query '{q}', stopping...")
+                    print(f"Rate limit hit for query '{q}', skipping...")
                     break
                 
-                time.sleep(0.5)
+                time.sleep(0.3)  # کاهش تاخیر بین درخواست‌ها
             except Exception as e:
                 print(f"Search error for '{q}': {e}")
                 continue
@@ -205,8 +246,21 @@ def search_github_repos(session, seen_repos):
     return repos
 
 
+def has_iran_keywords_in_description(description: str) -> bool:
+    """Check if description contains any of the Iran keywords"""
+    if not description:
+        return False
+    description_lower = description.lower()
+    for keyword in IRAN_KEYWORDS:
+        if keyword.lower() in description_lower:
+            return True
+    return False
+
+
 def has_persian_content(text: str) -> bool:
     """Check if text contains Persian/Farsi characters"""
+    if not text:
+        return False
     persian_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]')
     return bool(persian_pattern.search(text))
 
@@ -229,7 +283,7 @@ def extract_links_from_repo(session, repo_url, patterns):
                 if resp.status_code == 200:
                     content = resp.text
                     # Count configs in this file
-                    config_count = len([line for line in content.splitlines() if line.strip()])
+                    config_count = len([line for line in content.splitlines() if line.strip() and ('://' in line or 'vless' in line or 'vmess' in line)])
                     
                     for pattern in patterns:
                         matches = re.findall(pattern, content, re.IGNORECASE)
@@ -251,50 +305,43 @@ def extract_links_from_repo(session, repo_url, patterns):
     return set()
 
 
-def check_repository(session, repo_info, patterns, keywords, subscription_links):
+def check_repository(session, repo_info, patterns, subscription_links):
     """Check a single repository and extract the best subscription link"""
     repo_url = repo_info['url']
+    repo_name = repo_info['name']
+    description = repo_info.get('description', '') or ''
+    
     try:
-        repo_path = repo_url.replace('https://github.com/', '')
-        api_url = f'https://api.github.com/repos/{repo_path}'
-        resp = session.get(api_url, timeout=10)
+        # FIRST CHECK: Must have Iran keywords in description
+        if not has_iran_keywords_in_description(description):
+            # If description doesn't have keywords, check README
+            try:
+                readme_resp = session.get(f'https://raw.githubusercontent.com/{repo_name}/main/README.md', timeout=10)
+                if readme_resp.status_code != 200:
+                    readme_resp = session.get(f'https://raw.githubusercontent.com/{repo_name}/master/README.md', timeout=10)
+                if readme_resp.status_code == 200:
+                    readme_content = readme_resp.text
+                    if not has_iran_keywords_in_description(readme_content[:500]):  # Check first 500 chars
+                        return False
+                else:
+                    return False
+            except:
+                return False
         
-        if resp.status_code != 200:
-            return False
-        
-        repo_data = resp.json()
-        description = repo_data.get('description', '') or ''
-        topics = ' '.join(repo_data.get('topics', []))
-        readme_content = ""
-        
-        # Try to get README content
-        try:
-            readme_resp = session.get(f'https://raw.githubusercontent.com/{repo_path}/main/README.md', timeout=10)
-            if readme_resp.status_code != 200:
-                readme_resp = session.get(f'https://raw.githubusercontent.com/{repo_path}/master/README.md', timeout=10)
-            if readme_resp.status_code == 200:
-                readme_content = readme_resp.text
-        except:
-            pass
-        
-        full_text = (description + ' ' + topics + ' ' + readme_content).lower()
-        
-        # Check for Iran/Persian keywords or Persian content
-        has_iran_keyword = any(kw.lower() in full_text for kw in keywords)
-        has_persian = has_persian_content(description + readme_content)
-        
-        if not (has_iran_keyword or has_persian):
-            return False
-        
-        # Extract best link from this repository
+        # If we get here, Iran keywords are present in description or README
+        # Now extract best link from this repository
         links = extract_links_from_repo(session, repo_url, patterns)
         
         if links:
             subscription_links.update(links)
-            print(f"  Found best link from {repo_path} (updated: {repo_info.get('updated_at', 'unknown')[:10]})")
+            print(f"  ✓ Found: {repo_name} (updated: {repo_info.get('updated_at', 'unknown')[:10]})")
+            print(f"    Description: {description[:80]}...")
             return True
+        else:
+            print(f"  ✗ No links found: {repo_name}")
+            
     except Exception as e:
-        print(f"  Error checking {repo_url}: {e}")
+        print(f"  Error checking {repo_name}: {e}")
     return False
 
 
@@ -308,20 +355,22 @@ def find_subscription_links():
     session.headers.update(HEADERS)
     
     print(f"[*] Searching for Iran-related repos (last {SUBSCRIPTION_SEARCH_DAYS_BACK} days)...")
+    print(f"[*] Iran keywords: {', '.join(IRAN_KEYWORDS)}")
+    print(f"[*] Must appear in repository description or README\n")
     
     seen_repos = set()
     repos = search_github_repos(session, seen_repos)
-    print(f"[*] Found {len(repos)} candidate repositories")
+    print(f"[*] Found {len(repos)} candidate repositories from last {SUBSCRIPTION_SEARCH_DAYS_BACK} days")
     
     if not repos:
         print("[!] No repositories found")
         return []
     
-    print("[*] Checking repositories for subscription links...")
+    print("[*] Checking repositories for Iran keywords and subscription links...")
     subscription_links = set()
     
     with ThreadPoolExecutor(max_workers=SUBSCRIPTION_MAX_WORKERS) as executor:
-        futures = {executor.submit(check_repository, session, repo, SUBSCRIPTION_PATTERNS, IRAN_KEYWORDS, subscription_links): repo for repo in repos}
+        futures = {executor.submit(check_repository, session, repo, SUBSCRIPTION_PATTERNS, subscription_links): repo for repo in repos}
         for future in as_completed(futures):
             if stop_processing:
                 break
@@ -330,7 +379,7 @@ def find_subscription_links():
             except:
                 pass
     
-    print(f"[*] Validating {len(subscription_links)} extracted links...")
+    print(f"\n[*] Validating {len(subscription_links)} extracted links...")
     valid_links = []
     
     for link in list(subscription_links):
@@ -346,16 +395,17 @@ def find_subscription_links():
                     content_preview = test_resp.text[:500]
                     if '://' in content_preview or 'vless' in content_preview or 'vmess' in content_preview:
                         valid_links.append(link)
-                        print(f"  ✓ Valid link: {link[:80]}...")
                     else:
                         print(f"  ✗ Invalid content: {link[:80]}...")
                 except:
                     print(f"  ✗ Failed to fetch: {link[:80]}...")
+            else:
+                print(f"  ✗ Unreachable: {link[:80]}...")
         except:
             print(f"  ✗ Unreachable: {link[:80]}...")
     
     unique_links = list(set(valid_links))
-    print(f"[✓] Found {len(unique_links)} valid subscription links from {len(repos)} repositories (one link per repo)")
+    color_print(f"\n[✓] Found {len(unique_links)} valid subscription links (one per repo)", Fore.GREEN)
     
     return unique_links
 
