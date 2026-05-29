@@ -12,6 +12,7 @@ import signal
 import logging
 import base64
 import urllib.parse
+import warnings
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Tuple
@@ -392,7 +393,6 @@ def test_single_config(config_line: str) -> Tuple[Optional[str], Optional[float]
             return None, None
         
         # تست اتصال ساده
-        test_url = f"http://{host}:{port}/"
         start_time = time.time()
         
         # تلاش برای اتصال به پورت
